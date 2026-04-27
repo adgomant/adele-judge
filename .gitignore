@@ -10,3 +10,4 @@ logs/*.log
 .pyc
 data/
 playground/
+runs/

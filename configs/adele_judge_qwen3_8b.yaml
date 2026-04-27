@@ -28,7 +28,7 @@ data:
   token_length_batch_size: 512
 
 model:
-  model_name_or_path: Qwen/Qwen3-8B-Instruct
+  model_name_or_path: Qwen/Qwen2.5-7B-Instruct
   adapter_path: null
   trust_remote_code: true
 
