@@ -1,0 +1,12 @@
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.venv/
+.env
+__pycache__/
+*.py[cod]
+.DS_Store
+logs/*.log
+.pyc
+data/
+playground/
