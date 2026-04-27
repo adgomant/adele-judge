@@ -83,7 +83,8 @@ training:
   weight_decay: 0.0
   optim: adamw_8bit
   packing: false
-  group_by_length: true
+  train_sampling_strategy: group_by_length
+  length_column_name: length
   logging_steps: 20
   eval_steps: 1000
   save_steps: 1000

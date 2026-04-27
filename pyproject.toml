@@ -16,7 +16,7 @@ dependencies = [
   "pyyaml>=6",
   "rich>=13.7",
   "scikit-learn>=1.4",
-  "transformers>=4.51",
+  "transformers>=5.5,<6",
   "typer>=0.12",
 ]
 

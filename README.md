@@ -180,7 +180,8 @@ Packing is configurable:
 training:
   max_seq_length: 8192
   packing: false
-  group_by_length: true
+  train_sampling_strategy: group_by_length
+  length_column_name: length
 ```
 
 Use `scripts/debug_tokenization.py` before long runs to verify label masking on real examples.

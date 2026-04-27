@@ -81,7 +81,7 @@ requires-dist = [
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.6" },
     { name = "scikit-learn", specifier = ">=1.4" },
     { name = "torch", marker = "extra == 'train'", specifier = ">=2.3" },
-    { name = "transformers", specifier = ">=4.51" },
+    { name = "transformers", specifier = ">=5.5,<6" },
     { name = "trl", marker = "extra == 'train'", specifier = ">=0.9" },
     { name = "typer", specifier = ">=0.12" },
     { name = "unsloth", marker = "extra == 'train'", specifier = ">=2024.11" },
