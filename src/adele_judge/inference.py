@@ -4,7 +4,7 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
-from tqdm import tqdm
+from rich.progress import track
 
 from .formatting import format_prompt
 from .metrics import binary_from_score
@@ -62,7 +62,11 @@ def predict_dataframe(
     threshold = int(config["inference"].get("binary_threshold", 3))
     system_prompt = config["prompt"]["system_prompt"]
     rows = []
-    for _, row in tqdm(df.iterrows(), total=len(df), desc="restricted scoring"):
+    for _, row in track(
+        df.iterrows(),
+        total=len(df),
+        description="Scoring continuations",
+    ):
         example = row.to_dict()
         prompt = format_prompt(example, tokenizer, system_prompt)
         scored = score_allowed_continuations(model, tokenizer, prompt, allowed_scores)

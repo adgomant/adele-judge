@@ -1,7 +1,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from math import ceil
 from typing import Any
+
+from rich.progress import track
 
 from .formatting import format_prompt
 
@@ -99,7 +102,9 @@ def batch_response_token_lengths(
     batch_size: int = 512,
 ) -> list[int]:
     lengths: list[int] = []
-    for start in range(0, len(texts), batch_size):
+    starts = range(0, len(texts), batch_size)
+    total = ceil(len(texts) / batch_size) if texts else 0
+    for start in track(starts, total=total, description="Measuring response tokens"):
         batch = texts[start : start + batch_size]
         encoded = tokenizer(
             batch,

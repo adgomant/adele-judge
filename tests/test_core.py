@@ -3,7 +3,9 @@ from __future__ import annotations
 import math
 
 import pandas as pd
+from typer.testing import CliRunner
 
+from adele_judge.cli import app
 from adele_judge.data import (
     add_sequence_lengths_and_filter,
     apply_configured_filters,
@@ -17,6 +19,9 @@ from adele_judge.metrics import all_metrics, majority_binary_baseline
 from adele_judge.splits import fixed_by_model_split
 from adele_judge.tokenization import supervised_token_debug_rows, tokenize_supervised_example
 from adele_judge.train import pack_tokenized_rows
+
+
+runner = CliRunner()
 
 
 class FakeTokenizer:
@@ -208,3 +213,10 @@ def test_packing_preserves_supervised_labels():
     assert len(packed) == 1
     assert packed[0]["input_ids"] == [1, 2, 3, 4, 5]
     assert [x for x in packed[0]["labels"] if x != -100] == [3, 5]
+
+
+def test_cli_exposes_pipeline_commands():
+    result = runner.invoke(app, ["--help"])
+    assert result.exit_code == 0
+    for command in ["prepare", "train", "predict", "evaluate", "debug-tokenization", "lomo"]:
+        assert command in result.stdout

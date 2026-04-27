@@ -5,6 +5,7 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
+from rich.progress import track
 
 from .config import column_name
 from .formatting import clean_value
@@ -139,7 +140,11 @@ def add_sequence_lengths_and_filter(
     target_lengths: list[int | float] = []
     sequence_lengths: list[int | float] = []
     keep: list[bool] = []
-    for _, row in df.iterrows():
+    for _, row in track(
+        df.iterrows(),
+        total=len(df),
+        description="Checking sequence lengths",
+    ):
         example = row.to_dict()
         tokenized = tokenize_supervised_example(
             example,

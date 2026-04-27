@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+from rich.progress import track
 
 from .modeling import load_model_for_training
 from .pipeline import load_or_prepare_splits
@@ -42,7 +43,11 @@ def tokenize_training_dataframe(df: Any, tokenizer: Any, config: dict[str, Any])
     overflow = config["data"]["filters"].get("on_sequence_overflow", "skip")
     rows = []
     skipped = 0
-    for _, row in df.iterrows():
+    for _, row in track(
+        df.iterrows(),
+        total=len(df),
+        description="Tokenizing training rows",
+    ):
         tokenized = tokenize_supervised_example(
             row.to_dict(),
             tokenizer,

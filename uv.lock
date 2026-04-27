@@ -45,10 +45,11 @@ dependencies = [
     { name = "pandas", version = "3.0.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "pyarrow" },
     { name = "pyyaml" },
+    { name = "rich" },
     { name = "scikit-learn", version = "1.7.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "scikit-learn", version = "1.8.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
-    { name = "tqdm" },
     { name = "transformers" },
+    { name = "typer" },
 ]
 
 [package.optional-dependencies]
@@ -76,12 +77,13 @@ requires-dist = [
     { name = "pyarrow", specifier = ">=15" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8" },
     { name = "pyyaml", specifier = ">=6" },
+    { name = "rich", specifier = ">=13.7" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.6" },
     { name = "scikit-learn", specifier = ">=1.4" },
     { name = "torch", marker = "extra == 'train'", specifier = ">=2.3" },
-    { name = "tqdm", specifier = ">=4.66" },
     { name = "transformers", specifier = ">=4.51" },
     { name = "trl", marker = "extra == 'train'", specifier = ">=0.9" },
+    { name = "typer", specifier = ">=0.12" },
     { name = "unsloth", marker = "extra == 'train'", specifier = ">=2024.11" },
 ]
 provides-extras = ["train", "dev"]

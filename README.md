@@ -19,6 +19,7 @@ The project is designed for out-of-model generalization: train on responses from
 - QLoRA training support through Unsloth/TRL/Transformers/PEFT-compatible tooling
 - Restricted continuation log-probability inference over `"1"` through `"5"`
 - Ordinal, binary, grouped, and baseline metrics
+- Typer/Rich command-line interface with progress bars and tables
 - Reproducible run directories with configs, reports, predictions, and model artifacts
 
 ## Repository Layout
@@ -80,13 +81,13 @@ python -m pip install -e ".[dev]"
 Prepare filtered train/validation/test splits:
 
 ```bash
-python scripts/prepare_dataset.py --config configs/adele_judge_qwen3_8b.yaml
+adele-judge prepare --config configs/adele_judge_qwen3_8b.yaml
 ```
 
 Inspect which tokens receive supervised loss:
 
 ```bash
-python scripts/debug_tokenization.py \
+adele-judge debug-tokenization \
   --config configs/adele_judge_qwen3_8b.yaml \
   --num-examples 3
 ```
@@ -94,13 +95,13 @@ python scripts/debug_tokenization.py \
 Train the judge:
 
 ```bash
-python scripts/train_judge.py --config configs/adele_judge_qwen3_8b.yaml
+adele-judge train --config configs/adele_judge_qwen3_8b.yaml
 ```
 
 Run restricted-continuation prediction:
 
 ```bash
-python scripts/predict_judge.py \
+adele-judge predict \
   --config configs/adele_judge_qwen3_8b.yaml \
   --split validation
 ```
@@ -108,7 +109,7 @@ python scripts/predict_judge.py \
 Evaluate saved predictions:
 
 ```bash
-python scripts/evaluate_judge.py \
+adele-judge evaluate \
   --config configs/adele_judge_qwen3_8b.yaml \
   --split validation
 ```
@@ -116,7 +117,7 @@ python scripts/evaluate_judge.py \
 Run leave-one-model-out preparation or training:
 
 ```bash
-python scripts/run_lomo.py --config configs/adele_judge_qwen3_8b.yaml
+adele-judge lomo --config configs/adele_judge_qwen3_8b.yaml
 ```
 
 ## Configuration
@@ -126,7 +127,7 @@ The main config is [configs/adele_judge_qwen3_8b.yaml](configs/adele_judge_qwen3
 CLI overrides use repeated `--override key.path=value` arguments:
 
 ```bash
-python scripts/prepare_dataset.py \
+adele-judge prepare \
   --config configs/adele_judge_qwen3_8b.yaml \
   --override data.filters.max_response_tokens=2048 \
   --override training.max_seq_length=8192
