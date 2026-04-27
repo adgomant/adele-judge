@@ -106,12 +106,13 @@ def pack_tokenized_rows(rows: list[dict[str, Any]], max_seq_length: int) -> list
 
 def train_judge(config: dict[str, Any], force_prepare: bool = False) -> dict[str, Any]:
     from datasets import Dataset
-    from transformers import Trainer, TrainingArguments
 
     seed = int(config["training"].get("seed", config["project"].get("seed", 42)))
     set_seed(seed)
     output_dir = ensure_dir(project_output_dir(config))
     model, tokenizer = load_model_for_training(config)
+    from transformers import Trainer, TrainingArguments
+
     splits = load_or_prepare_splits(config, tokenizer, force_prepare=force_prepare)
 
     train_rows = tokenize_training_dataframe(splits["train"], tokenizer, config)
