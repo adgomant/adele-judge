@@ -66,6 +66,8 @@ def normalize_config(config: dict[str, Any]) -> dict[str, Any]:
     training.setdefault("cache_tokenized_datasets", True)
     training.setdefault("eval_subset_size", None)
     training.setdefault("eval_subset_seed", training.get("seed", config.get("project", {}).get("seed", 42)))
+    training.setdefault("eval_subset_strategy", "stratified")
+    training.setdefault("eval_subset_stratify_columns", ["model_id", "target_score"])
 
     inference = config.setdefault("inference", {})
     inference.setdefault("allowed_scores", ["1", "2", "3", "4", "5"])
@@ -117,6 +119,12 @@ def validate_config(config: dict[str, Any]) -> None:
     score_weights = config["training"].get("score_class_weights")
     if score_weights is not None and len(score_weights) != 5:
         raise ValueError("training.score_class_weights must contain five weights")
+    eval_subset_strategy = config["training"].get("eval_subset_strategy")
+    if eval_subset_strategy not in {"random", "stratified"}:
+        raise ValueError("training.eval_subset_strategy must be 'random' or 'stratified'")
+    stratify_columns = config["training"].get("eval_subset_stratify_columns")
+    if not isinstance(stratify_columns, list) or not stratify_columns:
+        raise ValueError("training.eval_subset_stratify_columns must be a non-empty list")
 
     method = config["inference"].get("method", "restricted_continuation_logprobs_fast")
     supported_methods = {

@@ -263,7 +263,7 @@ Use `scripts/debug_tokenization.py` before long runs to verify label masking on 
 
 Training writes `inference_config.yaml` with `model.adapter_path` pointing at the saved adapter. Prediction also auto-loads `runs/<run>/adapter` when it exists, which avoids accidentally evaluating the base model after a training run.
 
-The default training config uses a small validation monitor subset during training. Run full validation/test prediction and evaluation after training with the generated `inference_config.yaml`.
+The default training config uses a validation monitor subset during training, stratified by `model_id` and `target_score`. Run full validation/test prediction and evaluation after training with the generated `inference_config.yaml`.
 
 ## Inference
 

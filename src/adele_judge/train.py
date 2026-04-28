@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 import numpy as np
+import pandas as pd
 from rich.progress import track
 
 from .config import copy_config, save_config
@@ -173,7 +174,57 @@ def select_eval_subset(df: Any, config: dict[str, Any]) -> Any:
     if subset_size <= 0 or len(df) <= subset_size:
         return df
     seed = int(config["training"].get("eval_subset_seed", config["training"].get("seed", 42)))
+    if config["training"].get("eval_subset_strategy", "stratified") == "stratified":
+        return stratified_eval_subset(
+            df,
+            subset_size,
+            config["training"].get("eval_subset_stratify_columns", ["model_id", "target_score"]),
+            seed,
+        )
     return df.sample(n=subset_size, random_state=seed).reset_index(drop=True)
+
+
+def stratified_eval_subset(
+    df: Any,
+    subset_size: int,
+    columns: list[str],
+    seed: int,
+) -> Any:
+    available_columns = [column for column in columns if column in df.columns]
+    if not available_columns:
+        return df.sample(n=subset_size, random_state=seed).reset_index(drop=True)
+
+    grouped = df.groupby(available_columns, dropna=False, sort=True)
+    group_sizes = grouped.size()
+    ideal = group_sizes / len(df) * subset_size
+    allocations = ideal.apply(np.floor).astype(int)
+    non_empty = group_sizes > 0
+    allocations[non_empty & (allocations == 0)] = 1
+    allocations = allocations.clip(upper=group_sizes)
+
+    while int(allocations.sum()) > subset_size:
+        removable = allocations[allocations > 1]
+        if removable.empty:
+            break
+        key = (removable - ideal.loc[removable.index]).idxmax()
+        allocations.loc[key] -= 1
+
+    while int(allocations.sum()) < subset_size:
+        remaining = group_sizes - allocations
+        expandable = remaining[remaining > 0]
+        if expandable.empty:
+            break
+        key = (ideal.loc[expandable.index] - allocations.loc[expandable.index]).idxmax()
+        allocations.loc[key] += 1
+
+    chunks = []
+    for key, group in grouped:
+        n = int(allocations.loc[key])
+        if n > 0:
+            chunks.append(group.sample(n=n, random_state=seed))
+    if not chunks:
+        return df.sample(n=subset_size, random_state=seed).reset_index(drop=True)
+    return pd.concat(chunks).sample(frac=1.0, random_state=seed).reset_index(drop=True)
 
 
 def tokenized_cache_fingerprint(

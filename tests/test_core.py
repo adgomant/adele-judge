@@ -32,7 +32,7 @@ from adele_judge.tokenization import (
     tokenize_supervised_example,
     validate_score_tokenization,
 )
-from adele_judge.train import pack_tokenized_rows
+from adele_judge.train import pack_tokenized_rows, select_eval_subset
 
 
 runner = CliRunner()
@@ -396,6 +396,24 @@ def test_packing_preserves_supervised_labels():
     assert len(packed) == 1
     assert packed[0]["input_ids"] == [1, 2, 3, 4, 5]
     assert [x for x in packed[0]["labels"] if x != -100] == [3, 5]
+
+
+def test_eval_subset_can_be_stratified_by_model_and_score():
+    rows = []
+    for model_id in ["m1", "m2"]:
+        for score in [1, 2, 3, 4, 5]:
+            for index in range(10):
+                rows.append({"model_id": model_id, "target_score": score, "row": index})
+    df = pd.DataFrame(rows)
+    cfg = config()
+    cfg["project"] = {"seed": 42}
+    normalize_config(cfg)
+    cfg["training"]["eval_subset_size"] = 20
+    cfg["training"]["eval_subset_strategy"] = "stratified"
+    cfg["training"]["eval_subset_stratify_columns"] = ["model_id", "target_score"]
+    subset = select_eval_subset(df, cfg)
+    assert len(subset) == 20
+    assert (subset.groupby(["model_id", "target_score"]).size() == 2).all()
 
 
 def test_score_tokenization_contract_and_fast_inference():

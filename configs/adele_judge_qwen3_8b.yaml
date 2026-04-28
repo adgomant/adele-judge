@@ -79,8 +79,8 @@ split:
 
 training:
   # Full chat-formatted sequence length: system + user + response + score target.
-  # A5000 24GB full-run default: keeps >99.9% of prepared examples while avoiding 8K-context cost.
-  max_seq_length: 4096
+  # A5000 24GB throughput default: retains ~99.7% of prepared examples while reducing context cost.
+  max_seq_length: 3072
   load_in_4bit: true
   dtype: bfloat16
   objective: restricted_score_ce
@@ -94,8 +94,8 @@ training:
   learning_rate: 1.0e-4
   num_train_epochs: 1
   # Tuned for ~18GB baseline VRAM on A5000 24GB: same effective batch, fewer accumulation steps.
-  per_device_train_batch_size: 8
-  per_device_eval_batch_size: 8
+  per_device_train_batch_size: 5
+  per_device_eval_batch_size: 4
   gradient_accumulation_steps: 2
   warmup_steps: 450
   lr_scheduler_type: cosine
@@ -104,14 +104,16 @@ training:
   packing: false
   cache_tokenized_datasets: true
   # Monitor on a subset during training; run full restricted-continuation eval after training.
-  eval_subset_size: 4096
+  eval_subset_size: 8192
+  eval_subset_strategy: stratified
+  eval_subset_stratify_columns: [model_id, target_score]
   train_sampling_strategy: group_by_length
   length_column_name: length
   logging_steps: 20
   # Full training cadence for ~15K optimizer steps at effective batch size 16.
-  eval_steps: 5000
-  save_steps: 5000
-  save_total_limit: 3
+  eval_steps: 2000
+  save_steps: 2000
+  save_total_limit: 10
   seed: 42
 
 inference:
