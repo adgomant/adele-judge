@@ -28,7 +28,7 @@ data:
   token_length_batch_size: 512
 
 model:
-  model_name_or_path: Qwen/Qwen2.5-7B-Instruct
+  model_name_or_path: Qwen/Qwen3-8B
   revision: null
   adapter_path: null
   trust_remote_code: true
@@ -76,7 +76,7 @@ split:
 
 training:
   # Full chat-formatted sequence length: system + user + response + score target.
-  # The prepared dataset retains >99.9% of examples around 4096 tokens while using much less VRAM.
+  # A5000 24GB full-run default: keeps >99.9% of prepared examples while avoiding 8K-context cost.
   max_seq_length: 4096
   load_in_4bit: true
   dtype: bfloat16
@@ -85,7 +85,8 @@ training:
   score_class_weights: null
   lora_r: 32
   lora_alpha: 64
-  lora_dropout: 0.05
+  # Unsloth's fastest path is dropout-free; use score_class_weights/class_weighting for imbalance experiments.
+  lora_dropout: 0.0
   target_modules: auto
   learning_rate: 1.0e-4
   num_train_epochs: 1
@@ -98,13 +99,15 @@ training:
   optim: adamw_8bit
   packing: false
   cache_tokenized_datasets: true
+  # Monitor on a subset during training; run full restricted-continuation eval after training.
   eval_subset_size: 4096
   train_sampling_strategy: group_by_length
   length_column_name: length
   logging_steps: 20
-  eval_steps: 3000
-  save_steps: 3000
-  save_total_limit: 2
+  # Full training cadence for ~15K optimizer steps at effective batch size 16.
+  eval_steps: 5000
+  save_steps: 5000
+  save_total_limit: 3
   seed: 42
 
 inference:
