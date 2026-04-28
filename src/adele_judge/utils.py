@@ -6,6 +6,7 @@ import random
 import subprocess
 import sys
 from hashlib import sha256
+from importlib import metadata
 from pathlib import Path
 from typing import Any
 
@@ -39,13 +40,8 @@ def jsonable(data: Any) -> Any:
         return str(data)
     if isinstance(data, np.generic):
         return data.item()
-    try:
-        import torch
-
-        if isinstance(data, torch.dtype):
-            return str(data)
-    except Exception:
-        pass
+    if type(data).__module__ == "torch":
+        return str(data)
     return data
 
 
@@ -82,10 +78,9 @@ def package_versions() -> dict[str, str]:
         if package == "python":
             continue
         try:
-            module = __import__(package)
-            versions[package] = str(getattr(module, "__version__", "unknown"))
-        except Exception as exc:
-            versions[package] = f"unavailable: {type(exc).__name__}"
+            versions[package] = metadata.version(package)
+        except metadata.PackageNotFoundError:
+            versions[package] = "unavailable"
     return versions
 
 
