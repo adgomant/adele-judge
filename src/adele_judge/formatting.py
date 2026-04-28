@@ -101,7 +101,7 @@ def configure_tokenizer_thinking_mode(
     tokenizer: Any,
     config: dict[str, Any],
     *,
-    log: bool = True,
+    log: bool = False,
 ) -> Any:
     """Attach model thinking-mode policy to a tokenizer for shared formatting paths."""
 
