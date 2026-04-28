@@ -511,6 +511,7 @@ def train_judge(config: dict[str, Any], force_prepare: bool = False) -> dict[str
     save_config(inference_config, output_dir / "inference_config.yaml")
     write_json(output_dir / "train_metrics.json", _jsonable(metrics))
     write_json(output_dir / "validation_trainer_metrics.json", _jsonable(eval_metrics))
+    write_json(output_dir / "trainer_log_history.json", trainer.state.log_history)
     write_json(output_dir / "resolved_training_args.json", args.to_dict())
     write_json(
         output_dir / "run_metadata.json",

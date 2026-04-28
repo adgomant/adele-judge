@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
 import json
 import os
 import random
@@ -8,9 +9,43 @@ import sys
 from hashlib import sha256
 from importlib import metadata
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator, TextIO
 
 import numpy as np
+
+
+class Tee:
+    def __init__(self, *streams: TextIO):
+        self.streams = streams
+        self.encoding = getattr(streams[0], "encoding", "utf-8") if streams else "utf-8"
+
+    def write(self, text: str) -> int:
+        for stream in self.streams:
+            stream.write(text)
+        return len(text)
+
+    def flush(self) -> None:
+        for stream in self.streams:
+            stream.flush()
+
+    def isatty(self) -> bool:
+        return any(getattr(stream, "isatty", lambda: False)() for stream in self.streams)
+
+
+@contextmanager
+def tee_output(path: str | Path, mode: str = "w") -> Iterator[Path]:
+    path = Path(path)
+    ensure_dir(path.parent)
+    original_stdout = sys.stdout
+    original_stderr = sys.stderr
+    with path.open(mode, encoding="utf-8") as handle:
+        sys.stdout = Tee(original_stdout, handle)  # type: ignore[assignment]
+        sys.stderr = Tee(original_stderr, handle)  # type: ignore[assignment]
+        try:
+            yield path
+        finally:
+            sys.stdout = original_stdout
+            sys.stderr = original_stderr
 
 
 def ensure_dir(path: str | Path) -> Path:

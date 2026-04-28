@@ -21,7 +21,7 @@ from .reporting import save_prediction_reports
 from .splits import enumerate_lomo_models
 from .tokenization import supervised_token_debug_rows
 from .train import train_judge
-from .utils import ensure_dir, project_output_dir, write_json
+from .utils import ensure_dir, project_output_dir, tee_output, write_json
 
 
 class SplitName(str, Enum):
@@ -117,11 +117,17 @@ def train(
     override: OverrideOption = None,
 ) -> None:
     """Train the judge adapter."""
-    run_config = _load_config(config, override)
-    metrics = train_judge(run_config, force_prepare=force_prepare)
-    _print_metrics(metrics["train_metrics"], "Training Metrics")
-    _print_metrics(metrics["validation_trainer_metrics"], "Validation Trainer Metrics")
-    console.print("[green]Training complete.[/]")
+    run_config = load_config(config, override or [])
+    log_path = project_output_dir(run_config) / "training.log"
+    with tee_output(log_path):
+        run_name = run_config.get("project", {}).get("run_name", "unknown")
+        console.print(f"[bold]Run:[/] {run_name}")
+        console.print(f"[bold]Output:[/] {project_output_dir(run_config)}")
+        console.print(f"[bold]Log:[/] {log_path}")
+        metrics = train_judge(run_config, force_prepare=force_prepare)
+        _print_metrics(metrics["train_metrics"], "Training Metrics")
+        _print_metrics(metrics["validation_trainer_metrics"], "Validation Trainer Metrics")
+        console.print("[green]Training complete.[/]")
 
 
 @app.command()

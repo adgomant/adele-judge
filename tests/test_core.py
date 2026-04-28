@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import math
+import sys
 
 import pandas as pd
 from typer.testing import CliRunner
@@ -34,6 +35,7 @@ from adele_judge.tokenization import (
 )
 from adele_judge.train import pack_tokenized_rows, select_eval_subset
 from adele_judge.train import make_score_compute_metrics, make_score_logits_preprocessor
+from adele_judge.utils import tee_output
 
 
 runner = CliRunner()
@@ -475,6 +477,27 @@ def test_configurable_attention_implementation_for_transformers_loaders():
     assert kwargs["attn_implementation"] == "flash_attention_2"
     assert kwargs["trust_remote_code"] is True
     assert "revision" not in kwargs
+
+
+def test_tee_output_mirrors_stdout_and_stderr_and_restores_streams(tmp_path, capsys):
+    log_path = tmp_path / "training.log"
+    original_stdout = sys.stdout
+    original_stderr = sys.stderr
+
+    with tee_output(log_path):
+        assert sys.stdout is not original_stdout
+        assert sys.stderr is not original_stderr
+        print("stdout line")
+        print("stderr line", file=sys.stderr)
+
+    assert sys.stdout is original_stdout
+    assert sys.stderr is original_stderr
+    captured = capsys.readouterr()
+    assert "stdout line" in captured.out
+    assert "stderr line" in captured.err
+    log_text = log_path.read_text(encoding="utf-8")
+    assert "stdout line" in log_text
+    assert "stderr line" in log_text
 
 
 def test_cli_exposes_pipeline_commands():

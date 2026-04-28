@@ -307,6 +307,8 @@ adapter/
 tokenizer/
 train_metrics.json
 validation_trainer_metrics.json
+training.log
+trainer_log_history.json
 length_statistics.json
 dataset_filtering_report.json
 token_supervision_debug.txt
