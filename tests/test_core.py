@@ -14,7 +14,7 @@ from adele_judge.data import (
     length_filter_warnings,
     validate_scores,
 )
-from adele_judge.config import normalize_config
+from adele_judge.config import normalize_config, validate_config
 from adele_judge.formatting import (
     apply_chat_template_safe,
     build_messages,
@@ -25,6 +25,7 @@ from adele_judge.formatting import (
 from adele_judge.metrics import all_metrics, majority_binary_baseline
 from adele_judge.inference import score_allowed_continuations_batch
 from adele_judge.metrics import majority_ordinal_baseline
+from adele_judge.modeling import model_from_pretrained_kwargs
 from adele_judge.splits import fixed_by_model_split, lomo_split
 from adele_judge.tokenization import (
     supervised_token_debug_rows,
@@ -409,6 +410,23 @@ def test_score_tokenization_contract_and_fast_inference():
     )
     assert [row["pred_score"] for row in scored] == [5, 5]
     assert {row["scoring_method"] for row in scored} == {"single_forward_single_token"}
+
+
+def test_configurable_attention_implementation_for_transformers_loaders():
+    cfg = config()
+    cfg["project"] = {"seed": 42}
+    cfg["model"] = {
+        "model_name_or_path": "Qwen/Qwen3-8B",
+        "trust_remote_code": True,
+        "revision": None,
+        "attn_implementation": "flash_attention_2",
+    }
+    normalize_config(cfg)
+    validate_config(cfg)
+    kwargs = model_from_pretrained_kwargs(cfg)
+    assert kwargs["attn_implementation"] == "flash_attention_2"
+    assert kwargs["trust_remote_code"] is True
+    assert "revision" not in kwargs
 
 
 def test_cli_exposes_pipeline_commands():

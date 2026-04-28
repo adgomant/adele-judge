@@ -18,6 +18,9 @@ COMMON_LORA_TARGET_MODULES = [
 ]
 
 
+SUPPORTED_ATTENTION_IMPLEMENTATIONS = {"eager", "sdpa", "flash_attention_2", "flash_attention_3"}
+
+
 def torch_dtype_from_name(name: str | None) -> Any:
     import torch
 
@@ -46,6 +49,18 @@ def load_tokenizer(config: dict[str, Any]) -> Any:
         tokenizer.pad_token = tokenizer.eos_token
     configure_tokenizer_thinking_mode(tokenizer, config)
     return tokenizer
+
+
+def model_from_pretrained_kwargs(config: dict[str, Any]) -> dict[str, Any]:
+    kwargs: dict[str, Any] = {
+        "trust_remote_code": bool(config["model"].get("trust_remote_code", True)),
+    }
+    if config["model"].get("revision"):
+        kwargs["revision"] = config["model"]["revision"]
+    attn_implementation = config["model"].get("attn_implementation")
+    if attn_implementation:
+        kwargs["attn_implementation"] = attn_implementation
+    return kwargs
 
 
 def load_model_for_training(config: dict[str, Any]) -> tuple[Any, Any]:
@@ -110,11 +125,10 @@ def load_model_for_training_fallback(config: dict[str, Any]) -> tuple[Any, Any]:
         )
     model = AutoModelForCausalLM.from_pretrained(
         config["model"]["model_name_or_path"],
-        trust_remote_code=bool(config["model"].get("trust_remote_code", True)),
         torch_dtype=dtype,
         quantization_config=quantization_config,
         device_map="auto",
-        revision=config["model"].get("revision"),
+        **model_from_pretrained_kwargs(config),
     )
     if quantization_config is not None:
         model = prepare_model_for_kbit_training(model)
@@ -150,11 +164,10 @@ def load_model_for_inference(config: dict[str, Any]) -> tuple[Any, Any]:
         )
     model = AutoModelForCausalLM.from_pretrained(
         config["model"]["model_name_or_path"],
-        trust_remote_code=bool(config["model"].get("trust_remote_code", True)),
         torch_dtype=dtype,
         quantization_config=quantization_config,
         device_map="auto",
-        revision=config["model"].get("revision"),
+        **model_from_pretrained_kwargs(config),
     )
     adapter_path = resolve_adapter_path(config)
     if adapter_path:

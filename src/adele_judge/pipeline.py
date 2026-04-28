@@ -109,6 +109,7 @@ def preparation_fingerprint(
         "schema_version": 1,
         "model_name_or_path": config["model"]["model_name_or_path"],
         "model_revision": config["model"].get("revision"),
+        "attn_implementation": config["model"].get("attn_implementation"),
         "tokenizer_name_or_path": getattr(tokenizer, "name_or_path", None),
         "tokenizer_commit_hash": getattr(tokenizer, "init_kwargs", {}).get("_commit_hash"),
         "tokenizer_class": tokenizer.__class__.__name__,

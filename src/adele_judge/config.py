@@ -50,6 +50,7 @@ def normalize_config(config: dict[str, Any]) -> dict[str, Any]:
     model = config.setdefault("model", {})
     if "model_name_or_path" not in model and "name_or_path" in model:
         model["model_name_or_path"] = model["name_or_path"]
+    model.setdefault("attn_implementation", None)
     thinking_mode = model.setdefault("thinking_mode", {})
     thinking_mode.setdefault("enabled", False)
     thinking_mode.setdefault("apply_if_supported", True)
@@ -89,6 +90,12 @@ def validate_config(config: dict[str, Any]) -> None:
 
     if "model_name_or_path" not in config["model"]:
         raise ValueError("model.model_name_or_path is required")
+    attn_implementation = config["model"].get("attn_implementation")
+    supported_attention = {None, "eager", "sdpa", "flash_attention_2", "flash_attention_3"}
+    if attn_implementation not in supported_attention:
+        raise ValueError(
+            f"model.attn_implementation must be one of {sorted(item for item in supported_attention if item)}"
+        )
     thinking_mode = config["model"].get("thinking_mode", {})
     if not isinstance(thinking_mode, dict):
         raise ValueError("model.thinking_mode must be a mapping")

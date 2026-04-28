@@ -30,6 +30,9 @@ data:
 model:
   model_name_or_path: Qwen/Qwen3-8B
   revision: null
+  # Used only by the Transformers fallback/inference loaders.
+  # Unsloth chooses and patches its own attention backend during training.
+  attn_implementation: flash_attention_2
   adapter_path: null
   trust_remote_code: true
   # Optional. Applied only when the tokenizer chat template supports enable_thinking.
