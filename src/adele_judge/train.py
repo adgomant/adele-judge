@@ -11,6 +11,7 @@ from rich.progress import track
 
 from .config import copy_config, save_config
 from .formatting import tokenizer_thinking_template_kwargs
+from .metrics import all_metrics, binary_from_score
 from .modeling import load_model_for_training
 from .pipeline import load_or_prepare_splits
 from .tokenization import tokenize_supervised_example, validate_score_tokenization
@@ -164,6 +165,102 @@ def make_restricted_score_trainer(
             return (loss, outputs) if return_outputs else loss
 
     return _RestrictedScoreTrainer
+
+
+def make_score_logits_preprocessor(score_token_ids: list[int]) -> Any:
+    def preprocess_logits_for_metrics(logits: Any, labels: Any) -> Any:
+        import torch
+
+        if isinstance(logits, tuple):
+            logits = logits[0]
+        score_ids = torch.tensor(score_token_ids, dtype=torch.long, device=logits.device)
+        if logits.ndim == 3:
+            supervised = labels != -100
+            target_positions = supervised.to(dtype=torch.long).argmax(dim=1)
+            logit_positions = torch.clamp(target_positions - 1, min=0)
+            batch_indices = torch.arange(logits.shape[0], device=logits.device)
+            return logits[batch_indices, logit_positions][:, score_ids]
+        if logits.ndim == 2 and logits.shape[-1] != len(score_token_ids):
+            return logits[:, score_ids]
+        return logits
+
+    return preprocess_logits_for_metrics
+
+
+def make_score_compute_metrics(score_token_ids: list[int], threshold: int = 3) -> Any:
+    token_id_to_score = {int(token_id): score for score, token_id in enumerate(score_token_ids, start=1)}
+
+    def compute_metrics(eval_prediction: Any) -> dict[str, Any]:
+        predictions = eval_prediction.predictions
+        labels = eval_prediction.label_ids
+        if isinstance(predictions, tuple):
+            predictions = predictions[0]
+        if isinstance(labels, tuple):
+            labels = labels[0]
+
+        score_logits = np.asarray(predictions)
+        label_ids = np.asarray(labels)
+        if len(score_logits) == 0:
+            return {}
+        pred_scores = np.argmax(score_logits, axis=-1).astype(int) + 1
+
+        if label_ids.ndim == 2:
+            supervised = label_ids != -100
+            valid = supervised.any(axis=1)
+            target_positions = supervised.argmax(axis=1)
+            target_token_ids = label_ids[np.arange(len(label_ids)), target_positions]
+        else:
+            valid = np.ones(len(label_ids), dtype=bool)
+            target_token_ids = label_ids
+
+        target_scores = np.array(
+            [_score_from_metric_label(token_id, token_id_to_score) for token_id in target_token_ids],
+            dtype=float,
+        )
+        valid = valid & ~np.isnan(target_scores)
+        if not np.any(valid):
+            return {}
+
+        score_logits = score_logits[valid]
+        pred_scores = pred_scores[valid].astype(int)
+        target_scores = target_scores[valid].astype(int)
+        probs = _softmax_np(score_logits)
+        sorted_logits = np.sort(score_logits, axis=1)
+        score_margin = sorted_logits[:, -1] - sorted_logits[:, -2]
+        score_entropy = -np.sum(probs * np.log(np.clip(probs, 1e-12, 1.0)), axis=1)
+
+        metrics_df = pd.DataFrame(
+            {
+                "target_score": target_scores,
+                "pred_score": pred_scores,
+                "target_binary": [binary_from_score(score, threshold) for score in target_scores],
+                "pred_binary": [binary_from_score(score, threshold) for score in pred_scores],
+                "score_margin": score_margin,
+                "score_entropy": score_entropy,
+            }
+        )
+        for index, score in enumerate(range(1, 6)):
+            metrics_df[f"prob_{score}"] = probs[:, index]
+        return all_metrics(metrics_df, threshold)
+
+    return compute_metrics
+
+
+def _score_from_metric_label(label: Any, token_id_to_score: dict[int, int]) -> float:
+    value = int(label)
+    if value in token_id_to_score:
+        return float(token_id_to_score[value])
+    if 1 <= value <= 5:
+        return float(value)
+    if 0 <= value < 5:
+        return float(value + 1)
+    return float("nan")
+
+
+def _softmax_np(values: np.ndarray) -> np.ndarray:
+    shifted = values - np.max(values, axis=1, keepdims=True)
+    exp_values = np.exp(shifted)
+    return exp_values / exp_values.sum(axis=1, keepdims=True)
 
 
 def select_eval_subset(df: Any, config: dict[str, Any]) -> Any:
@@ -369,6 +466,19 @@ def train_judge(config: dict[str, Any], force_prepare: bool = False) -> dict[str
     trainer_class = Trainer
     score_token_ids: list[int] | None = None
     class_weights = score_class_weights(splits["train"], config)
+    compute_metrics = None
+    preprocess_logits_for_metrics = None
+    metric_score_token_ids = [
+        item["token_ids"][0]
+        for item in sorted(score_report, key=lambda row: int(row["score"]))
+        if item["num_tokens"] == 1
+    ]
+    if len(metric_score_token_ids) == 5:
+        compute_metrics = make_score_compute_metrics(
+            metric_score_token_ids,
+            threshold=int(config["inference"].get("binary_threshold", 3)),
+        )
+        preprocess_logits_for_metrics = make_score_logits_preprocessor(metric_score_token_ids)
     if objective == "restricted_score_ce":
         score_token_ids = [
             next(item for item in score_report if item["score"] == str(score))["token_ids"][0]
@@ -385,6 +495,8 @@ def train_judge(config: dict[str, Any], force_prepare: bool = False) -> dict[str
             tokenizer,
             include_score_metadata=objective == "restricted_score_ce",
         ),
+        compute_metrics=compute_metrics,
+        preprocess_logits_for_metrics=preprocess_logits_for_metrics,
     )
     result = trainer.train()
     metrics = result.metrics

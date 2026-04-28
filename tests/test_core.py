@@ -33,6 +33,7 @@ from adele_judge.tokenization import (
     validate_score_tokenization,
 )
 from adele_judge.train import pack_tokenized_rows, select_eval_subset
+from adele_judge.train import make_score_compute_metrics, make_score_logits_preprocessor
 
 
 runner = CliRunner()
@@ -428,6 +429,35 @@ def test_score_tokenization_contract_and_fast_inference():
     )
     assert [row["pred_score"] for row in scored] == [5, 5]
     assert {row["scoring_method"] for row in scored} == {"single_forward_single_token"}
+
+
+def test_eval_score_metrics_use_reduced_score_logits():
+    import torch
+    from types import SimpleNamespace
+
+    score_token_ids = [ord(str(score)) for score in range(1, 6)]
+    logits = torch.zeros((2, 5, 128))
+    labels = torch.full((2, 5), -100)
+    labels[0, 3] = ord("1")
+    labels[1, 4] = ord("5")
+    logits[0, 2, ord("1")] = 10.0
+    logits[1, 3, ord("4")] = 10.0
+
+    preprocess = make_score_logits_preprocessor(score_token_ids)
+    reduced = preprocess(logits, labels)
+    assert reduced.shape == (2, 5)
+
+    compute_metrics = make_score_compute_metrics(score_token_ids, threshold=3)
+    metrics = compute_metrics(
+        SimpleNamespace(
+            predictions=reduced.numpy(),
+            label_ids=labels.numpy(),
+        )
+    )
+    assert math.isclose(metrics["ordinal_accuracy"], 0.5)
+    assert math.isclose(metrics["within_1_accuracy"], 1.0)
+    assert math.isclose(metrics["binary_accuracy"], 1.0)
+    assert "expected_calibration_error_10bin" in metrics
 
 
 def test_configurable_attention_implementation_for_transformers_loaders():

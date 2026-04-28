@@ -65,10 +65,12 @@ prompt:
 split:
   mode: fixed_by_model
   validation_models:
-    - DK-R1-Dist-Qwen-14B
-    - gemini-2.5-flash
-  test_models:
+    - o1-mini
     - llama3d2-11b
+  test_models:
+    - gemini-3-flash
+    - DK-R1-Dist-Qwen-14B
+    - llama3d2-3b
   train_models: auto_except_val_test
   held_out_model: null
   # In leave-one-model-out mode, held-out examples are reserved for final test.
@@ -93,7 +95,6 @@ training:
   target_modules: auto
   learning_rate: 1.0e-4
   num_train_epochs: 1
-  # Tuned for ~18GB baseline VRAM on A5000 24GB: same effective batch, fewer accumulation steps.
   per_device_train_batch_size: 5
   per_device_eval_batch_size: 4
   gradient_accumulation_steps: 2
@@ -110,8 +111,7 @@ training:
   train_sampling_strategy: group_by_length
   length_column_name: length
   logging_steps: 20
-  # Full training cadence for ~15K optimizer steps at effective batch size 16.
-  eval_steps: 2000
+  eval_steps: 1000
   save_steps: 2000
   save_total_limit: 10
   seed: 42
