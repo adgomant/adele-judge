@@ -23,6 +23,62 @@ def encode_text(tokenizer: Any, text: str) -> list[int]:
     return tokenizer(text, add_special_tokens=False, truncation=False)["input_ids"]
 
 
+def score_tokenization_report(tokenizer: Any, allowed_scores: list[str]) -> list[dict[str, Any]]:
+    rows = []
+    for raw_score in allowed_scores:
+        score = str(raw_score)
+        token_ids = encode_text(tokenizer, score)
+        rows.append(
+            {
+                "score": score,
+                "token_ids": token_ids,
+                "tokens": tokenizer.convert_ids_to_tokens(token_ids)
+                if hasattr(tokenizer, "convert_ids_to_tokens")
+                else [tokenizer.decode([token_id]) for token_id in token_ids],
+                "num_tokens": len(token_ids),
+            }
+        )
+    return rows
+
+
+def validate_score_tokenization(
+    tokenizer: Any,
+    allowed_scores: list[str],
+    *,
+    require_single_token: bool = False,
+) -> list[dict[str, Any]]:
+    """Validate the bare score-string contract shared by training and inference."""
+
+    report = score_tokenization_report(tokenizer, allowed_scores)
+    seen_tokenizations: dict[tuple[int, ...], str] = {}
+    expected_scores = {str(score) for score in range(1, 6)}
+    configured_scores = {str(score) for score in allowed_scores}
+    if configured_scores != expected_scores:
+        raise ValueError(
+            "allowed_scores must be exactly the bare strings '1', '2', '3', '4', and '5'"
+        )
+    for item in report:
+        score = item["score"]
+        if score.strip() != score or score != str(int(score)):
+            raise ValueError(f"Score continuation must be a bare integer string, got {score!r}")
+        token_ids = item["token_ids"]
+        if not token_ids:
+            raise ValueError(f"Score continuation {score!r} produced no tokens")
+        if require_single_token and len(token_ids) != 1:
+            raise ValueError(
+                f"Score continuation {score!r} must be single-token for this objective/method; "
+                f"got token ids {token_ids}"
+            )
+        key = tuple(token_ids)
+        previous = seen_tokenizations.get(key)
+        if previous is not None:
+            raise ValueError(
+                f"Score continuations {previous!r} and {score!r} share tokenization {token_ids}"
+            )
+        seen_tokenizations[key] = score
+    return report
+
+
 def tokenize_supervised_example(
     example: dict[str, Any],
     tokenizer: Any,

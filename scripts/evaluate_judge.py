@@ -7,7 +7,7 @@ from pathlib import Path
 import pandas as pd
 
 from adele_judge.config import load_config
-from adele_judge.metrics import majority_binary_baseline
+from adele_judge.metrics import majority_binary_baseline, majority_ordinal_baseline
 from adele_judge.pipeline import load_prepared_split
 from adele_judge.reporting import save_prediction_reports
 from adele_judge.utils import project_output_dir, write_json
@@ -38,7 +38,13 @@ def main() -> None:
         eval_df,
         threshold=int(config["inference"]["binary_threshold"]),
     )
+    ordinal_baseline = majority_ordinal_baseline(
+        train_df,
+        eval_df,
+        threshold=int(config["inference"]["binary_threshold"]),
+    )
     write_json(out_dir / f"majority_baseline_{args.split}.json", baseline)
+    write_json(out_dir / f"majority_ordinal_baseline_{args.split}.json", ordinal_baseline)
     print(metrics)
 
 

@@ -29,11 +29,27 @@ def ordinal_metrics(df: pd.DataFrame) -> dict[str, Any]:
     pred = df["pred_score"].astype(int).to_numpy()
     if len(true) == 0:
         return {"ordinal_accuracy": None, "ordinal_mae": None, "within_1_accuracy": None}
-    return {
+    metrics: dict[str, Any] = {
         "ordinal_accuracy": float(np.mean(true == pred)),
         "ordinal_mae": float(np.mean(np.abs(true - pred))),
         "within_1_accuracy": float(np.mean(np.abs(true - pred) <= 1)),
     }
+    cm = confusion_matrix_df(true.tolist(), pred.tolist(), ORDINAL_LABELS)
+    f1s = []
+    for label in ORDINAL_LABELS:
+        tp = int(cm.loc[label, label])
+        fp = int(cm[label].sum() - tp)
+        fn = int(cm.loc[label].sum() - tp)
+        precision = _safe_div(tp, tp + fp)
+        recall = _safe_div(tp, tp + fn)
+        f1 = _safe_div(2 * precision * recall, precision + recall)
+        metrics[f"precision_score_{label}"] = precision
+        metrics[f"recall_score_{label}"] = recall
+        metrics[f"f1_score_{label}"] = f1
+        metrics[f"support_score_{label}"] = int(cm.loc[label].sum())
+        f1s.append(f1)
+    metrics["ordinal_macro_f1"] = float(np.mean(f1s))
+    return metrics
 
 
 def binary_metrics(df: pd.DataFrame, threshold: int = 3) -> dict[str, Any]:
@@ -79,7 +95,12 @@ def all_metrics(df: pd.DataFrame, threshold: int = 3) -> dict[str, Any]:
     out = {}
     out.update(ordinal_metrics(df))
     out.update(binary_metrics(df, threshold))
+    out.update(calibration_metrics(df))
     out["num_examples"] = int(len(df))
+    if "target_binary" in df.columns:
+        counts = df["target_binary"].value_counts()
+        for label in BINARY_LABELS:
+            out[f"support_{label.lower()}"] = int(counts.get(label, 0))
     return out
 
 
@@ -128,6 +149,68 @@ def majority_binary_baseline(train_df: pd.DataFrame, eval_df: pd.DataFrame, thre
     metrics["num_train_examples"] = int(len(train_df))
     metrics["num_eval_examples"] = int(len(eval_df))
     return metrics
+
+
+def majority_ordinal_baseline(
+    train_df: pd.DataFrame,
+    eval_df: pd.DataFrame,
+    threshold: int = 3,
+) -> dict[str, Any]:
+    majority = int(train_df["target_score"].astype(int).value_counts().idxmax())
+    baseline = eval_df.copy()
+    baseline["pred_score"] = majority
+    baseline["pred_binary"] = baseline["pred_score"].map(lambda score: binary_from_score(score, threshold))
+    metrics = ordinal_metrics(baseline)
+    metrics["majority_score"] = majority
+    metrics["num_train_examples"] = int(len(train_df))
+    metrics["num_eval_examples"] = int(len(eval_df))
+    return metrics
+
+
+def calibration_metrics(df: pd.DataFrame, num_bins: int = 10) -> dict[str, Any]:
+    prob_cols = [f"prob_{score}" for score in ORDINAL_LABELS if f"prob_{score}" in df.columns]
+    if not prob_cols:
+        return {}
+    probs = df[prob_cols].astype(float).to_numpy()
+    confidence = probs.max(axis=1)
+    correct = (df["target_score"].astype(int).to_numpy() == df["pred_score"].astype(int).to_numpy())
+    metrics: dict[str, Any] = {
+        "confidence_mean": float(np.mean(confidence)) if len(confidence) else None,
+        "confidence_p50": float(np.quantile(confidence, 0.50)) if len(confidence) else None,
+        "confidence_p90": float(np.quantile(confidence, 0.90)) if len(confidence) else None,
+        "expected_calibration_error_10bin": _expected_calibration_error(
+            confidence,
+            correct.astype(float),
+            num_bins,
+        ),
+    }
+    if "score_margin" in df.columns:
+        metrics["score_margin_mean"] = float(pd.to_numeric(df["score_margin"]).mean())
+    if "score_entropy" in df.columns:
+        metrics["score_entropy_mean"] = float(pd.to_numeric(df["score_entropy"]).mean())
+    return metrics
+
+
+def _expected_calibration_error(
+    confidence: np.ndarray,
+    correct: np.ndarray,
+    num_bins: int,
+) -> float:
+    if len(confidence) == 0:
+        return 0.0
+    bins = np.linspace(0.0, 1.0, num_bins + 1)
+    ece = 0.0
+    for index in range(num_bins):
+        left = bins[index]
+        right = bins[index + 1]
+        if index == num_bins - 1:
+            mask = (confidence >= left) & (confidence <= right)
+        else:
+            mask = (confidence >= left) & (confidence < right)
+        if not np.any(mask):
+            continue
+        ece += float(np.mean(mask) * abs(np.mean(confidence[mask]) - np.mean(correct[mask])))
+    return ece
 
 
 def _safe_div(num: float, den: float) -> float:

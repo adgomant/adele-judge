@@ -16,8 +16,9 @@ The project is designed for out-of-model generalization: train on responses from
 - Ordinal target construction from two judge scores
 - Fixed model-based splits and leave-one-model-out workflows
 - Chat-style supervised fine-tuning with loss only on the score digit
+- Optional restricted 5-way score cross-entropy aligned with continuation scoring
 - QLoRA training support through Unsloth/TRL/Transformers/PEFT-compatible tooling
-- Restricted continuation log-probability inference over `"1"` through `"5"`
+- Batched restricted continuation log-probability inference over `"1"` through `"5"`
 - Ordinal, binary, grouped, and baseline metrics
 - Typer/Rich command-line interface with progress bars and tables
 - Reproducible run directories with configs, reports, predictions, and model artifacts
@@ -54,7 +55,16 @@ Default base model:
 ```yaml
 model:
   model_name_or_path: Qwen/Qwen3-8B-Instruct
+  trust_remote_code: true
+  thinking_mode:
+    enabled: false
+    apply_if_supported: true
 ```
+
+For tokenizers whose chat template supports a thinking flag such as `enable_thinking`,
+the default judge configuration uses non-thinking mode so the model is trained and
+scored as a direct `"1"` through `"5"` continuation. Unsupported tokenizers skip this
+option rather than receiving an unknown chat-template argument.
 
 ## Installation
 
@@ -161,12 +171,13 @@ data:
 8. Format examples with the same chat template used for training and inference.
 9. Enforce `max_seq_length` with `on_sequence_overflow: skip` or `error`.
 10. Create model-held-out splits.
+11. Write a preparation fingerprint so stale prepared splits are rebuilt when relevant settings change.
 
 `data.filters.max_response_tokens` and `training.max_seq_length` are intentionally separate gates. The response cap applies only to the model response before prompt formatting. The sequence cap applies later to the full chat-formatted training example, including the system prompt, benchmark/task metadata, question, reference answer, response, chat-template tokens, and score target. Passing the response cap does not guarantee that an example fits in `max_seq_length`.
 
 ## Training Behavior
 
-The model is trained with standard causal language-model cross-entropy loss, but labels are masked so loss is applied only to the assistant score continuation:
+The default config trains with restricted 5-way score cross-entropy over the score token ids. The baseline `causal_lm` objective is still available; in that mode labels are masked so standard causal language-model loss is applied only to the assistant score continuation:
 
 ```text
 system + user prompt -> assistant score digit
@@ -186,6 +197,8 @@ training:
 
 Use `scripts/debug_tokenization.py` before long runs to verify label masking on real examples.
 
+Training writes `inference_config.yaml` with `model.adapter_path` pointing at the saved adapter. Prediction also auto-loads `runs/<run>/adapter` when it exists, which avoids accidentally evaluating the base model after a training run.
+
 ## Inference
 
 Default prediction does not use free-form generation. For each example, the pipeline scores the explicit continuations:
@@ -194,7 +207,7 @@ Default prediction does not use free-form generation. For each example, the pipe
 "1", "2", "3", "4", "5"
 ```
 
-Each continuation is scored by log probability, including the robust case where a score string tokenizes into more than one token. The highest-probability continuation becomes `pred_score`, and `pred_binary` is derived with the fixed threshold.
+When all score continuations are single-token, inference uses one batched forward pass per prompt batch and gathers the five score-token log probabilities from the prompt-final logits. If a continuation is multi-token, the code falls back to exact continuation scoring. The highest-probability continuation becomes `pred_score`, and `pred_binary` is derived with the fixed threshold.
 
 ## Metrics
 
@@ -209,7 +222,9 @@ The evaluator reports:
 - Per-class precision, recall, and F1
 - False positive and false negative rates for the `CORRECT` class
 - Per-model, per-benchmark, per-task, per-target-score, and response-length-bucket metrics
-- Majority binary baseline from the training split
+- Per-score precision, recall, F1, support, and ordinal macro-F1
+- Confidence, score-margin, entropy, and simple calibration summaries when probabilities are present
+- Majority binary and ordinal baselines from the training split
 
 ## Run Artifacts
 
@@ -235,6 +250,11 @@ confusion_matrix_binary.csv
 length_statistics.json
 dataset_filtering_report.json
 token_supervision_debug.txt
+score_tokenization_report.json
+prepared_fingerprint.json
+resolved_training_args.json
+run_metadata.json
+inference_config.yaml
 ```
 
 Some reports are also saved with split-specific filenames, for example `validation_per_model_metrics.csv`.
@@ -262,6 +282,7 @@ The tests cover target construction, split leakage checks, prompt formatting, su
 - The processed parquet already contains a `response_tokens` column, but this pipeline recomputes response lengths with the selected tokenizer.
 - The default response cap remains `4096`, while the default full sequence length is `8192`.
 - Validation and test models must not appear in the training split.
+- In leave-one-model-out mode, the held-out model is reserved for test; validation is sampled from training-side models for monitoring.
 - Long examples are filtered or rejected; they are not silently truncated.
-- Adapter loading for inference is controlled by `model.adapter_path`.
+- Adapter loading for inference is controlled by `model.adapter_path`, with auto-resolution to the run adapter when present.
 - Zero-shot scoring can be run by omitting `model.adapter_path` and using the same restricted continuation scorer.

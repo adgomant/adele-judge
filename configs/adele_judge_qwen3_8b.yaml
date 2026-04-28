@@ -21,7 +21,7 @@ data:
     # Response-only cap: filters the model response before prompt formatting.
     # This is independent from training.max_seq_length below.
     max_disagreement: 1
-    max_response_tokens: 4096
+    max_response_tokens: 3072
     # Full-sequence overflow policy after chat formatting. Passing max_response_tokens
     # does not guarantee that an example fits in max_seq_length.
     on_sequence_overflow: skip
@@ -29,8 +29,14 @@ data:
 
 model:
   model_name_or_path: Qwen/Qwen2.5-7B-Instruct
+  revision: null
   adapter_path: null
   trust_remote_code: true
+  # Optional. Applied only when the tokenizer chat template supports enable_thinking.
+  # For Qwen3-style templates, the default judge behavior is non-thinking mode.
+  thinking_mode:
+    enabled: false
+    apply_if_supported: true
 
 prompt:
   system_prompt: |
@@ -62,41 +68,53 @@ split:
     - llama3d2-11b
   train_models: auto_except_val_test
   held_out_model: null
+  # In leave-one-model-out mode, held-out examples are reserved for final test.
+  # Validation is sampled from the remaining training-side models for monitoring.
+  lomo_validation_fraction: 0.05
+  lomo_validation_max_examples: 30000
+  lomo_validation_seed: 42
 
 training:
   # Full chat-formatted sequence length: system + user + response + score target.
-  # Qwen3-8B supports a much longer native context; 8192 is a conservative QLoRA default.
-  max_seq_length: 8192
+  # The prepared dataset retains >99.9% of examples around 4096 tokens while using much less VRAM.
+  max_seq_length: 4096
   load_in_4bit: true
   dtype: bfloat16
+  objective: restricted_score_ce
+  class_weighting: null
+  score_class_weights: null
   lora_r: 32
   lora_alpha: 64
   lora_dropout: 0.05
   target_modules: auto
   learning_rate: 1.0e-4
   num_train_epochs: 1
-  per_device_train_batch_size: 16
-  per_device_eval_batch_size: 16
-  gradient_accumulation_steps: 1
+  per_device_train_batch_size: 4
+  per_device_eval_batch_size: 4
+  gradient_accumulation_steps: 4
   warmup_steps: 450
   lr_scheduler_type: cosine
   weight_decay: 0.0
   optim: adamw_8bit
   packing: false
+  cache_tokenized_datasets: true
+  eval_subset_size: 4096
   train_sampling_strategy: group_by_length
   length_column_name: length
   logging_steps: 20
-  eval_steps: 1000
-  save_steps: 1000
-  save_total_limit: 3
+  eval_steps: 3000
+  save_steps: 3000
+  save_total_limit: 2
   seed: 42
 
 inference:
   allowed_scores: ["1", "2", "3", "4", "5"]
   binary_threshold: 3
-  method: restricted_continuation_logprobs
+  method: restricted_continuation_logprobs_fast
   generation_fallback: false
-  batch_size: 1
+  batch_size: 32
+  require_adapter: false
+  allow_base_model: true
 
 evaluation:
-  length_buckets: [0, 256, 512, 1024, 2048, 4096, 8192, 1000000000]
+  length_buckets: [0, 256, 512, 1024, 2048, 3072, 4096, 1000000000]

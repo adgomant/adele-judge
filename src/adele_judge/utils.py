@@ -3,6 +3,9 @@ from __future__ import annotations
 import json
 import os
 import random
+import subprocess
+import sys
+from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
@@ -18,11 +21,72 @@ def ensure_dir(path: str | Path) -> Path:
 def write_json(path: str | Path, data: Any) -> None:
     path = Path(path)
     ensure_dir(path.parent)
-    path.write_text(json.dumps(data, indent=2, sort_keys=True), encoding="utf-8")
+    path.write_text(json.dumps(jsonable(data), indent=2, sort_keys=True), encoding="utf-8")
 
 
 def read_json(path: str | Path) -> Any:
     return json.loads(Path(path).read_text(encoding="utf-8"))
+
+
+def jsonable(data: Any) -> Any:
+    if isinstance(data, dict):
+        return {str(key): jsonable(value) for key, value in data.items()}
+    if isinstance(data, (list, tuple)):
+        return [jsonable(value) for value in data]
+    if isinstance(data, set):
+        return sorted(jsonable(value) for value in data)
+    if isinstance(data, Path):
+        return str(data)
+    if isinstance(data, np.generic):
+        return data.item()
+    try:
+        import torch
+
+        if isinstance(data, torch.dtype):
+            return str(data)
+    except Exception:
+        pass
+    return data
+
+
+def stable_json_hash(data: Any) -> str:
+    encoded = json.dumps(jsonable(data), sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return sha256(encoded).hexdigest()
+
+
+def file_sha256(path: str | Path, chunk_size: int = 1024 * 1024) -> str:
+    digest = sha256()
+    with Path(path).open("rb") as handle:
+        for chunk in iter(lambda: handle.read(chunk_size), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def git_commit() -> str | None:
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except Exception:
+        return None
+    return result.stdout.strip() or None
+
+
+def package_versions() -> dict[str, str]:
+    packages = ["python", "torch", "transformers", "datasets", "peft", "trl", "unsloth"]
+    versions = {"python": sys.version.split()[0]}
+    for package in packages:
+        if package == "python":
+            continue
+        try:
+            module = __import__(package)
+            versions[package] = str(getattr(module, "__version__", "unknown"))
+        except Exception as exc:
+            versions[package] = f"unavailable: {type(exc).__name__}"
+    return versions
 
 
 def set_seed(seed: int) -> None:

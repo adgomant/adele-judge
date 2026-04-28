@@ -14,10 +14,23 @@ from adele_judge.data import (
     length_filter_warnings,
     validate_scores,
 )
-from adele_judge.formatting import build_user_message
+from adele_judge.config import normalize_config
+from adele_judge.formatting import (
+    apply_chat_template_safe,
+    build_messages,
+    build_user_message,
+    configure_tokenizer_thinking_mode,
+    format_prompt,
+)
 from adele_judge.metrics import all_metrics, majority_binary_baseline
-from adele_judge.splits import fixed_by_model_split
-from adele_judge.tokenization import supervised_token_debug_rows, tokenize_supervised_example
+from adele_judge.inference import score_allowed_continuations_batch
+from adele_judge.metrics import majority_ordinal_baseline
+from adele_judge.splits import fixed_by_model_split, lomo_split
+from adele_judge.tokenization import (
+    supervised_token_debug_rows,
+    tokenize_supervised_example,
+    validate_score_tokenization,
+)
 from adele_judge.train import pack_tokenized_rows
 
 
@@ -31,13 +44,113 @@ class FakeTokenizer:
     eos_token = "<eos>"
     chat_template = None
 
-    def __call__(self, text, add_special_tokens=False, truncation=False, padding=False):
+    def __call__(
+        self,
+        text,
+        add_special_tokens=False,
+        truncation=False,
+        padding=False,
+        return_tensors=None,
+    ):
         if isinstance(text, list):
-            return {"input_ids": [[ord(ch) for ch in item] for item in text]}
+            input_ids = [[ord(ch) for ch in item] for item in text]
+            attention_mask = [[1] * len(ids) for ids in input_ids]
+            if padding:
+                max_len = max(len(ids) for ids in input_ids)
+                input_ids = [ids + [0] * (max_len - len(ids)) for ids in input_ids]
+                attention_mask = [
+                    mask + [0] * (max_len - len(mask))
+                    for mask in attention_mask
+                ]
+            if return_tensors == "pt":
+                import torch
+
+                return {
+                    "input_ids": torch.tensor(input_ids),
+                    "attention_mask": torch.tensor(attention_mask),
+                }
+            return {"input_ids": input_ids, "attention_mask": attention_mask}
         return {"input_ids": [ord(ch) for ch in text]}
 
     def decode(self, ids):
         return "".join(chr(i) for i in ids if i != 0)
+
+    def convert_ids_to_tokens(self, ids):
+        return [self.decode([token_id]) for token_id in ids]
+
+
+class FakeChatTokenizer(FakeTokenizer):
+    chat_template = "{% for message in messages %}{{ message['content'] }}{% endfor %}"
+
+    def __init__(self):
+        self.calls = []
+
+    def apply_chat_template(self, messages, *, tokenize, add_generation_prompt, **kwargs):
+        self.calls.append(
+            {
+                "messages": messages,
+                "tokenize": tokenize,
+                "add_generation_prompt": add_generation_prompt,
+                "kwargs": kwargs,
+            }
+        )
+        if kwargs:
+            raise TypeError(f"Unsupported chat template kwargs: {kwargs}")
+        text = "\n".join(message["content"] for message in messages)
+        if add_generation_prompt:
+            text += "\n"
+        return self(text, add_special_tokens=False)["input_ids"] if tokenize else text
+
+
+class FakeThinkingChatTokenizer(FakeTokenizer):
+    name_or_path = "Qwen/Qwen3-8B"
+    chat_template = (
+        "{% if enable_thinking is defined %}thinking={{ enable_thinking }}{% endif %}"
+        "{% for message in messages %}{{ message['content'] }}{% endfor %}"
+    )
+
+    def __init__(self):
+        self.calls = []
+
+    def apply_chat_template(
+        self,
+        messages,
+        *,
+        tokenize,
+        add_generation_prompt,
+        enable_thinking=None,
+    ):
+        self.calls.append(
+            {
+                "messages": messages,
+                "tokenize": tokenize,
+                "add_generation_prompt": add_generation_prompt,
+                "enable_thinking": enable_thinking,
+            }
+        )
+        text = f"thinking={enable_thinking}\n"
+        text += "\n".join(message["content"] for message in messages)
+        if add_generation_prompt:
+            text += "\n"
+        return self(text, add_special_tokens=False)["input_ids"] if tokenize else text
+
+
+class AlwaysFiveModel:
+    def __init__(self):
+        import torch
+
+        self.param = torch.nn.Parameter(torch.zeros(1))
+
+    def parameters(self):
+        yield self.param
+
+    def __call__(self, input_ids, attention_mask=None):
+        import torch
+        from types import SimpleNamespace
+
+        logits = torch.zeros((*input_ids.shape, 128), device=input_ids.device)
+        logits[:, :, ord("5")] = 10.0
+        return SimpleNamespace(logits=logits)
 
 
 def config():
@@ -105,6 +218,15 @@ def test_fixed_split_auto_train_models_has_no_leakage():
     assert splits["test"]["model_id"].tolist() == ["m3"]
 
 
+def test_lomo_split_reserves_held_out_for_test_only():
+    df = construct_targets(canonicalize_columns(raw_df(), config()))
+    splits = lomo_split(df, "m3", validation_fraction=0.5, seed=7)
+    assert set(splits["test"]["model_id"]) == {"m3"}
+    assert "m3" not in set(splits["train"]["model_id"])
+    assert "m3" not in set(splits["validation"]["model_id"])
+    assert len(splits["train"]) + len(splits["validation"]) + len(splits["test"]) == len(df)
+
+
 def test_formatting_omits_hidden_training_metadata():
     df = construct_targets(canonicalize_columns(raw_df(), config()))
     message = build_user_message(df.iloc[0].to_dict())
@@ -125,6 +247,7 @@ def test_supervised_labels_only_cover_score_digit():
         max_seq_length=10000,
     )
     assert tokenized is not None
+    assert tokenized.target_length == 1
     supervised = [label for label in tokenized.labels if label != -100]
     assert tok.decode(supervised) == "4"
     rows = supervised_token_debug_rows(
@@ -134,6 +257,63 @@ def test_supervised_labels_only_cover_score_digit():
         max_seq_length=10000,
     )
     assert [row["token"] for row in rows if row["supervised"]] == ["4"]
+
+
+def test_qwen3_style_config_applies_non_thinking_when_supported():
+    cfg = config()
+    cfg["model"] = {"model_name_or_path": "Qwen/Qwen3-8B"}
+    normalize_config(cfg)
+    tokenizer = configure_tokenizer_thinking_mode(FakeThinkingChatTokenizer(), cfg, log=False)
+    messages = build_messages(raw_df().iloc[0].to_dict(), "Return one score.")
+
+    rendered = apply_chat_template_safe(
+        tokenizer,
+        messages,
+        tokenize=False,
+        add_generation_prompt=True,
+    )
+
+    assert tokenizer.calls[-1]["enable_thinking"] is False
+    assert rendered.startswith("thinking=False")
+
+
+def test_non_thinking_tokenizer_does_not_receive_unsupported_kwargs():
+    cfg = config()
+    cfg["model"] = {"model_name_or_path": "Example/Plain-Instruct"}
+    normalize_config(cfg)
+    tokenizer = configure_tokenizer_thinking_mode(FakeChatTokenizer(), cfg, log=False)
+    messages = build_messages(raw_df().iloc[0].to_dict(), "Return one score.")
+
+    apply_chat_template_safe(
+        tokenizer,
+        messages,
+        tokenize=False,
+        add_generation_prompt=True,
+    )
+
+    assert tokenizer.calls[-1]["kwargs"] == {}
+
+
+def test_preprocessing_and_inference_prompt_formatting_are_consistent():
+    cfg = config()
+    cfg["model"] = {"model_name_or_path": "Qwen/Qwen3-8B"}
+    normalize_config(cfg)
+    tokenizer = configure_tokenizer_thinking_mode(FakeThinkingChatTokenizer(), cfg, log=False)
+    df = construct_targets(canonicalize_columns(raw_df(), cfg))
+    example = df.iloc[0].to_dict()
+
+    prompt = format_prompt(example, tokenizer, cfg["prompt"]["system_prompt"])
+    tokenized = tokenize_supervised_example(
+        example,
+        tokenizer,
+        cfg["prompt"]["system_prompt"],
+        max_seq_length=10000,
+    )
+
+    assert tokenized is not None
+    assert tokenized.prompt_length == len(tokenizer(prompt, add_special_tokens=False)["input_ids"])
+    assert tokenizer.calls[-2]["enable_thinking"] is False
+    assert tokenizer.calls[-1]["enable_thinking"] is False
 
 
 def test_sequence_overflow_skip():
@@ -202,6 +382,8 @@ def test_metrics_and_majority_baseline():
     assert math.isclose(metrics["binary_accuracy"], 0.75)
     baseline = majority_binary_baseline(pred, pred)
     assert baseline["majority_class"] in {"CORRECT", "INCORRECT"}
+    ordinal_baseline = majority_ordinal_baseline(pred, pred)
+    assert ordinal_baseline["majority_score"] in {1, 2, 3, 5}
 
 
 def test_packing_preserves_supervised_labels():
@@ -213,6 +395,20 @@ def test_packing_preserves_supervised_labels():
     assert len(packed) == 1
     assert packed[0]["input_ids"] == [1, 2, 3, 4, 5]
     assert [x for x in packed[0]["labels"] if x != -100] == [3, 5]
+
+
+def test_score_tokenization_contract_and_fast_inference():
+    tokenizer = FakeTokenizer()
+    report = validate_score_tokenization(tokenizer, ["1", "2", "3", "4", "5"])
+    assert [item["num_tokens"] for item in report] == [1, 1, 1, 1, 1]
+    scored = score_allowed_continuations_batch(
+        AlwaysFiveModel(),
+        tokenizer,
+        ["prompt A", "prompt B"],
+        ["1", "2", "3", "4", "5"],
+    )
+    assert [row["pred_score"] for row in scored] == [5, 5]
+    assert {row["scoring_method"] for row in scored} == {"single_forward_single_token"}
 
 
 def test_cli_exposes_pipeline_commands():

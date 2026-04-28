@@ -14,7 +14,7 @@ from rich.table import Table
 from .config import load_config, save_config
 from .data import load_and_construct_targets
 from .inference import predict_with_config
-from .metrics import majority_binary_baseline
+from .metrics import majority_binary_baseline, majority_ordinal_baseline
 from .modeling import load_tokenizer
 from .pipeline import load_or_prepare_splits, load_prepared_split, prepare_dataset
 from .reporting import save_prediction_reports
@@ -188,9 +188,16 @@ def evaluate(
         eval_df,
         threshold=int(run_config["inference"]["binary_threshold"]),
     )
+    ordinal_baseline = majority_ordinal_baseline(
+        train_df,
+        eval_df,
+        threshold=int(run_config["inference"]["binary_threshold"]),
+    )
     write_json(out_dir / f"majority_baseline_{split.value}.json", baseline)
+    write_json(out_dir / f"majority_ordinal_baseline_{split.value}.json", ordinal_baseline)
     _print_metrics(metrics, f"{split.value.title()} Metrics")
     _print_metrics(baseline, "Majority Binary Baseline")
+    _print_metrics(ordinal_baseline, "Majority Ordinal Baseline")
     console.print("[green]Evaluation reports updated.[/]")
 
 

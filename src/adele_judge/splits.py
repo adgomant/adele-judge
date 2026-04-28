@@ -13,7 +13,13 @@ def create_splits(df: pd.DataFrame, config: dict[str, Any]) -> dict[str, pd.Data
         held_out = config["split"].get("held_out_model")
         if not held_out:
             raise ValueError("split.held_out_model is required for a single leave-one-model-out fold")
-        return lomo_split(df, held_out)
+        return lomo_split(
+            df,
+            held_out,
+            validation_fraction=float(config["split"].get("lomo_validation_fraction", 0.05)),
+            validation_max_examples=config["split"].get("lomo_validation_max_examples"),
+            seed=int(config["split"].get("lomo_validation_seed", config["project"].get("seed", 42))),
+        )
     raise ValueError(f"Unsupported split mode: {mode}")
 
 
@@ -47,12 +53,33 @@ def fixed_by_model_split(df: pd.DataFrame, config: dict[str, Any]) -> dict[str, 
     return splits
 
 
-def lomo_split(df: pd.DataFrame, held_out_model: str) -> dict[str, pd.DataFrame]:
+def lomo_split(
+    df: pd.DataFrame,
+    held_out_model: str,
+    *,
+    validation_fraction: float = 0.05,
+    validation_max_examples: int | None = None,
+    seed: int = 42,
+) -> dict[str, pd.DataFrame]:
     if held_out_model not in set(df["model_id"].dropna().unique()):
         raise ValueError(f"Held-out model {held_out_model!r} not found")
-    train = df[df["model_id"] != held_out_model].reset_index(drop=True)
+    if not 0.0 < validation_fraction < 1.0:
+        raise ValueError("validation_fraction must be between 0 and 1")
+    train_pool = df[df["model_id"] != held_out_model].copy()
     test = df[df["model_id"] == held_out_model].reset_index(drop=True)
-    return {"train": train, "validation": test.copy(), "test": test}
+    validation_size = max(1, int(round(len(train_pool) * validation_fraction)))
+    if validation_max_examples is not None:
+        validation_size = min(validation_size, int(validation_max_examples))
+    validation_size = min(validation_size, max(1, len(train_pool) - 1))
+    validation = train_pool.sample(n=validation_size, random_state=seed)
+    train = train_pool.drop(index=validation.index)
+    splits = {
+        "train": train.reset_index(drop=True),
+        "validation": validation.reset_index(drop=True),
+        "test": test,
+    }
+    validate_lomo_no_heldout_leakage(splits, held_out_model)
+    return splits
 
 
 def enumerate_lomo_models(df: pd.DataFrame) -> list[str]:
@@ -80,6 +107,19 @@ def validate_no_model_leakage(splits: dict[str, pd.DataFrame]) -> None:
                 raise ValueError(
                     f"Model leakage between {left_name} and {right_name}: {sorted(overlap)}"
                 )
+
+
+def validate_lomo_no_heldout_leakage(
+    splits: dict[str, pd.DataFrame],
+    held_out_model: str,
+) -> None:
+    for split_name in ["train", "validation"]:
+        models = set(splits[split_name]["model_id"].dropna().unique().tolist())
+        if held_out_model in models:
+            raise ValueError(f"Held-out model leaked into {split_name}: {held_out_model}")
+    test_models = set(splits["test"]["model_id"].dropna().unique().tolist())
+    if test_models != {held_out_model}:
+        raise ValueError(f"LOMO test split must contain only {held_out_model!r}, got {test_models}")
 
 
 def split_report(splits: dict[str, pd.DataFrame]) -> dict[str, Any]:

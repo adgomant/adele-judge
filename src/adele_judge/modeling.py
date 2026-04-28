@@ -1,6 +1,10 @@
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
+from warnings import warn
+
+from .formatting import configure_tokenizer_thinking_mode
 
 
 COMMON_LORA_TARGET_MODULES = [
@@ -32,12 +36,15 @@ def torch_dtype_from_name(name: str | None) -> Any:
 def load_tokenizer(config: dict[str, Any]) -> Any:
     from transformers import AutoTokenizer
 
-    tokenizer = AutoTokenizer.from_pretrained(
-        config["model"]["model_name_or_path"],
-        trust_remote_code=bool(config["model"].get("trust_remote_code", True)),
-    )
+    kwargs = {
+        "trust_remote_code": bool(config["model"].get("trust_remote_code", True)),
+    }
+    if config["model"].get("revision"):
+        kwargs["revision"] = config["model"]["revision"]
+    tokenizer = AutoTokenizer.from_pretrained(config["model"]["model_name_or_path"], **kwargs)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
+    configure_tokenizer_thinking_mode(tokenizer, config)
     return tokenizer
 
 
@@ -49,11 +56,15 @@ def load_model_for_training(config: dict[str, Any]) -> tuple[Any, Any]:
     try:
         from unsloth import FastLanguageModel
 
+        kwargs = {}
+        if config["model"].get("revision"):
+            kwargs["revision"] = config["model"]["revision"]
         model, tokenizer = FastLanguageModel.from_pretrained(
             model_name=model_name,
             max_seq_length=int(training["max_seq_length"]),
             dtype=dtype,
             load_in_4bit=bool(training.get("load_in_4bit", True)),
+            **kwargs,
         )
         target_modules = training.get("target_modules", "auto")
         if target_modules == "auto":
@@ -68,10 +79,16 @@ def load_model_for_training(config: dict[str, Any]) -> tuple[Any, Any]:
             use_gradient_checkpointing="unsloth",
             random_state=int(training.get("seed", config["project"].get("seed", 42))),
         )
+        model.adele_training_backend = "unsloth"
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
+        configure_tokenizer_thinking_mode(tokenizer, config)
         return model, tokenizer
-    except Exception:
+    except Exception as exc:
+        warn(
+            f"Falling back to Transformers/PEFT training loader because Unsloth load failed: {exc}",
+            stacklevel=2,
+        )
         return load_model_for_training_fallback(config)
 
 
@@ -97,6 +114,7 @@ def load_model_for_training_fallback(config: dict[str, Any]) -> tuple[Any, Any]:
         torch_dtype=dtype,
         quantization_config=quantization_config,
         device_map="auto",
+        revision=config["model"].get("revision"),
     )
     if quantization_config is not None:
         model = prepare_model_for_kbit_training(model)
@@ -111,25 +129,68 @@ def load_model_for_training_fallback(config: dict[str, Any]) -> tuple[Any, Any]:
         task_type="CAUSAL_LM",
         target_modules=target_modules,
     )
-    return get_peft_model(model, lora_config), tokenizer
+    model = get_peft_model(model, lora_config)
+    model.adele_training_backend = "transformers_peft"
+    return model, tokenizer
 
 
 def load_model_for_inference(config: dict[str, Any]) -> tuple[Any, Any]:
     import torch
-    from transformers import AutoModelForCausalLM
+    from transformers import AutoModelForCausalLM, BitsAndBytesConfig
 
     tokenizer = load_tokenizer(config)
     dtype = torch_dtype_from_name(config.get("training", {}).get("dtype")) or torch.bfloat16
+    quantization_config = None
+    if bool(config.get("inference", {}).get("load_in_4bit", False)):
+        quantization_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_compute_dtype=dtype,
+            bnb_4bit_use_double_quant=True,
+        )
     model = AutoModelForCausalLM.from_pretrained(
         config["model"]["model_name_or_path"],
         trust_remote_code=bool(config["model"].get("trust_remote_code", True)),
         torch_dtype=dtype,
+        quantization_config=quantization_config,
         device_map="auto",
+        revision=config["model"].get("revision"),
     )
-    adapter_path = config["model"].get("adapter_path")
+    adapter_path = resolve_adapter_path(config)
     if adapter_path:
         from peft import PeftModel
 
-        model = PeftModel.from_pretrained(model, adapter_path)
+        model = PeftModel.from_pretrained(model, str(adapter_path))
     model.eval()
     return model, tokenizer
+
+
+def resolve_adapter_path(config: dict[str, Any]) -> Path | None:
+    configured = config["model"].get("adapter_path")
+    if configured:
+        path = Path(configured).expanduser()
+        if not path.exists():
+            raise FileNotFoundError(f"Configured adapter_path does not exist: {path}")
+        return path
+
+    default_adapter = Path(config["project"]["output_dir"]) / "adapter"
+    if default_adapter.exists():
+        warn(
+            f"model.adapter_path is not set; auto-loading trained adapter at {default_adapter}",
+            stacklevel=2,
+        )
+        return default_adapter
+
+    inference = config.get("inference", {})
+    if bool(inference.get("require_adapter", False)) or not bool(
+        inference.get("allow_base_model", True)
+    ):
+        raise FileNotFoundError(
+            "No adapter configured or found at the run output directory. "
+            "Set model.adapter_path or disable inference.require_adapter."
+        )
+    warn(
+        "No adapter configured or found; inference will run the base model.",
+        stacklevel=2,
+    )
+    return None

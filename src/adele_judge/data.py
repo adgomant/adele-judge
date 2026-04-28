@@ -121,8 +121,18 @@ def apply_configured_filters(df: pd.DataFrame, config: dict[str, Any]) -> tuple[
         "after_response_length_filter": len(after_length),
         "removed_by_disagreement": total - len(after_disagreement),
         "removed_by_response_length": len(after_disagreement) - len(after_length),
+        "removed_by_disagreement_pct": _safe_pct(total - len(after_disagreement), total),
+        "removed_by_response_length_pct": _safe_pct(
+            len(after_disagreement) - len(after_length),
+            len(after_disagreement),
+        ),
         "max_disagreement": max_disagreement,
         "max_response_tokens": max_response_tokens,
+        "filter_stage_distributions": {
+            "raw": distribution_summary(df),
+            "after_disagreement_filter": distribution_summary(after_disagreement),
+            "after_response_length_filter": distribution_summary(after_length),
+        },
     }
     return after_length.reset_index(drop=True), report
 
@@ -180,6 +190,7 @@ def add_sequence_lengths_and_filter(
         "on_sequence_overflow": overflow_mode,
         "examples_before_sequence_filter": len(df),
         "sequence_overflow_count": int(len(df) - len(kept)),
+        "sequence_overflow_pct": _safe_pct(len(df) - len(kept), len(df)),
         "examples_after_sequence_filter": len(kept),
         "sequence_overflow_reason": (
             "Full chat-formatted sequence exceeded max_seq_length after response filtering. "
@@ -209,6 +220,18 @@ def length_statistics(df: pd.DataFrame) -> dict[str, Any]:
         if col in df.columns and len(df):
             stats[col] = _series_stats(df[col])
     return stats
+
+
+def distribution_summary(df: pd.DataFrame, *, max_values: int = 100) -> dict[str, Any]:
+    summary: dict[str, Any] = {"num_examples": int(len(df))}
+    for col in ["model_id", "benchmark", "task", "target_score", "target_binary"]:
+        if col not in df.columns:
+            continue
+        counts = df[col].value_counts(dropna=False).head(max_values)
+        summary[col] = {str(key): int(value) for key, value in counts.items()}
+        if df[col].nunique(dropna=False) > max_values:
+            summary[f"{col}_truncated"] = True
+    return summary
 
 
 def length_filter_warnings(
@@ -241,7 +264,12 @@ def _series_stats(series: pd.Series) -> dict[str, Any]:
         "max": int(numeric.max()) if len(numeric) else None,
         "mean": float(numeric.mean()) if len(numeric) else None,
         "p50": float(numeric.quantile(0.50)) if len(numeric) else None,
+        "p75": float(numeric.quantile(0.75)) if len(numeric) else None,
         "p90": float(numeric.quantile(0.90)) if len(numeric) else None,
         "p95": float(numeric.quantile(0.95)) if len(numeric) else None,
         "p99": float(numeric.quantile(0.99)) if len(numeric) else None,
     }
+
+
+def _safe_pct(num: int | float, den: int | float) -> float:
+    return float(num / den * 100.0) if den else 0.0
