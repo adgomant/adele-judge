@@ -1,0 +1,2 @@
+[console_scripts]
+adele-judge = adele_judge.cli:app

@@ -27,15 +27,26 @@ adele-judge = "adele_judge.cli:app"
 train = [
   "accelerate>=0.34",
   "bitsandbytes>=0.43",
+  "ninja>=1.11",
+  "packaging>=24",
   "peft>=0.12",
+  "psutil>=5.9",
+  "setuptools>=69",
   "torch>=2.3",
   "trl>=0.9",
   "unsloth>=2024.11",
+  "wheel>=0.43",
+]
+fa2 = [
+  "flash-attn>=2.8",
 ]
 dev = [
   "pytest>=8",
   "ruff>=0.6",
 ]
+
+[tool.uv.extra-build-dependencies]
+flash-attn = ["setuptools>=69", "wheel>=0.43", "packaging>=24", "torch>=2.3"]
 
 [tool.setuptools.packages.find]
 where = ["src"]

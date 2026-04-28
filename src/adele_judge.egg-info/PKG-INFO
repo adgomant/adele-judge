@@ -1,3 +1,36 @@
+Metadata-Version: 2.4
+Name: adele-judge
+Version: 0.1.0
+Summary: Configurable ADeLe-specific distilled judge training and evaluation pipeline.
+Requires-Python: >=3.10
+Description-Content-Type: text/markdown
+Requires-Dist: datasets>=2.19
+Requires-Dist: numpy>=1.26
+Requires-Dist: pandas>=2.1
+Requires-Dist: pyarrow>=15
+Requires-Dist: pyyaml>=6
+Requires-Dist: rich>=13.7
+Requires-Dist: scikit-learn>=1.4
+Requires-Dist: transformers<6,>=5.5
+Requires-Dist: typer>=0.12
+Provides-Extra: train
+Requires-Dist: accelerate>=0.34; extra == "train"
+Requires-Dist: bitsandbytes>=0.43; extra == "train"
+Requires-Dist: ninja>=1.11; extra == "train"
+Requires-Dist: packaging>=24; extra == "train"
+Requires-Dist: peft>=0.12; extra == "train"
+Requires-Dist: psutil>=5.9; extra == "train"
+Requires-Dist: setuptools>=69; extra == "train"
+Requires-Dist: torch>=2.3; extra == "train"
+Requires-Dist: trl>=0.9; extra == "train"
+Requires-Dist: unsloth>=2024.11; extra == "train"
+Requires-Dist: wheel>=0.43; extra == "train"
+Provides-Extra: fa2
+Requires-Dist: flash-attn>=2.8; extra == "fa2"
+Provides-Extra: dev
+Requires-Dist: pytest>=8; extra == "dev"
+Requires-Dist: ruff>=0.6; extra == "dev"
+
 # ADeLe Distilled Judge
 
 A configurable training and evaluation pipeline for an **ADeLe-suite-specific distilled judge**. The judge learns to score model responses on the ADeLe benchmark suite as an ordinal value from `1` to `5`, then derives binary correctness only for reporting:
@@ -54,9 +87,8 @@ Default base model:
 
 ```yaml
 model:
-  model_name_or_path: Qwen/Qwen3-8B
+  model_name_or_path: Qwen/Qwen3-8B-Instruct
   trust_remote_code: true
-  attn_implementation: flash_attention_2
   thinking_mode:
     enabled: false
     apply_if_supported: true
@@ -69,91 +101,36 @@ option rather than receiving an unknown chat-template argument.
 
 ## Installation
 
-This repository is managed with [`uv`](https://docs.astral.sh/uv/). The lockfile records the resolved dependency set, and the CLI examples below assume commands are run through `uv run`.
-
-Core data preparation and reporting install:
-
-```bash
-uv sync
-```
-
-Developer/test install:
-
-```bash
-uv sync --extra dev
-```
-
-Training install for a Linux + CUDA machine:
-
-```bash
-uv sync --extra train
-```
-
-Training with FlashAttention 2 support:
-
-```bash
-uv sync --extra train --extra fa2
-```
-
-The `train` extra includes CUDA training/runtime helpers used by Unsloth, TRL, PEFT, and bitsandbytes:
-
-```text
-accelerate, bitsandbytes, ninja, packaging, peft, psutil, setuptools, torch, trl, unsloth, wheel
-```
-
-The `fa2` extra installs `flash-attn`. It is intentionally separate because FlashAttention is Linux/CUDA/PyTorch-build sensitive and can make CPU, macOS, or mismatched CUDA environments brittle.
-
-If FlashAttention needs to be installed manually in an already-created environment, use:
-
-```bash
-uv pip install setuptools wheel packaging psutil ninja
-MAX_JOBS=4 uv pip install flash-attn --no-build-isolation
-```
-
-Verify the CUDA training stack:
-
-```bash
-uv run python -c "import torch; print(torch.__version__, torch.version.cuda, torch.cuda.is_available()); print(torch.cuda.get_device_name(0) if torch.cuda.is_available() else 'no cuda')"
-uv run python -c "import flash_attn; print(flash_attn.__version__)"
-```
-
-Optional, but recommended for faster and less rate-limited Hugging Face downloads:
-
-```bash
-export HF_TOKEN=...
-```
-
-If you prefer `pip`, install equivalent extras with:
+Install the core package:
 
 ```bash
 python -m pip install -e .
-python -m pip install -e ".[dev]"
-python -m pip install -e ".[train]"
-python -m pip install -e ".[train,fa2]"
 ```
 
-## Dependency Extras
+Install training dependencies on a CUDA machine:
 
-The extras are:
+```bash
+python -m pip install -e ".[train]"
+```
 
-- `dev`: test and lint tools.
-- `train`: CUDA training stack without FlashAttention.
-- `fa2`: FlashAttention 2, opt-in for compatible Linux/CUDA environments.
+Install developer/test dependencies:
 
-`flash-attn` has undeclared build requirements in some environments, so [pyproject.toml](pyproject.toml) includes `tool.uv.extra-build-dependencies` for uv builds.
+```bash
+python -m pip install -e ".[dev]"
+```
 
 ## Quick Start
 
 Prepare filtered train/validation/test splits:
 
 ```bash
-uv run adele-judge prepare --config configs/adele_judge_qwen3_8b.yaml
+adele-judge prepare --config configs/adele_judge_qwen3_8b.yaml
 ```
 
 Inspect which tokens receive supervised loss:
 
 ```bash
-uv run adele-judge debug-tokenization \
+adele-judge debug-tokenization \
   --config configs/adele_judge_qwen3_8b.yaml \
   --num-examples 3
 ```
@@ -161,29 +138,29 @@ uv run adele-judge debug-tokenization \
 Train the judge:
 
 ```bash
-uv run adele-judge train --config configs/adele_judge_qwen3_8b.yaml
+adele-judge train --config configs/adele_judge_qwen3_8b.yaml
 ```
 
 Run restricted-continuation prediction:
 
 ```bash
-uv run adele-judge predict \
-  --config runs/qwen3_8b_adele_judge/inference_config.yaml \
+adele-judge predict \
+  --config configs/adele_judge_qwen3_8b.yaml \
   --split validation
 ```
 
 Evaluate saved predictions:
 
 ```bash
-uv run adele-judge evaluate \
-  --config runs/qwen3_8b_adele_judge/inference_config.yaml \
+adele-judge evaluate \
+  --config configs/adele_judge_qwen3_8b.yaml \
   --split validation
 ```
 
 Run leave-one-model-out preparation or training:
 
 ```bash
-uv run adele-judge lomo --config configs/adele_judge_qwen3_8b.yaml
+adele-judge lomo --config configs/adele_judge_qwen3_8b.yaml
 ```
 
 ## Configuration
@@ -193,7 +170,7 @@ The main config is [configs/adele_judge_qwen3_8b.yaml](configs/adele_judge_qwen3
 CLI overrides use repeated `--override key.path=value` arguments:
 
 ```bash
-uv run adele-judge prepare \
+adele-judge prepare \
   --config configs/adele_judge_qwen3_8b.yaml \
   --override data.filters.max_response_tokens=2048 \
   --override training.max_seq_length=8192
@@ -245,7 +222,7 @@ Packing is configurable:
 
 ```yaml
 training:
-  max_seq_length: 4096
+  max_seq_length: 8192
   packing: false
   train_sampling_strategy: group_by_length
   length_column_name: length
@@ -322,13 +299,13 @@ Some reports are also saved with split-specific filenames, for example `validati
 Run the lightweight test suite:
 
 ```bash
-uv run pytest
+python -m pytest
 ```
 
 Run linting:
 
 ```bash
-uv run ruff check .
+ruff check .
 ```
 
 The tests cover target construction, split leakage checks, prompt formatting, supervised label masking, packing behavior, and metrics.
@@ -336,11 +313,9 @@ The tests cover target construction, split leakage checks, prompt formatting, su
 ## Notes For Operators
 
 - The processed parquet already contains a `response_tokens` column, but this pipeline recomputes response lengths with the selected tokenizer.
-- The default response cap is `3072`, while the default full sequence length is `4096`.
+- The default response cap remains `4096`, while the default full sequence length is `8192`.
 - Validation and test models must not appear in the training split.
 - In leave-one-model-out mode, the held-out model is reserved for test; validation is sampled from training-side models for monitoring.
 - Long examples are filtered or rejected; they are not silently truncated.
 - Adapter loading for inference is controlled by `model.adapter_path`, with auto-resolution to the run adapter when present.
 - Zero-shot scoring can be run by omitting `model.adapter_path` and using the same restricted continuation scorer.
-- Unsloth chooses its own attention backend during training. `model.attn_implementation` is passed only to the Transformers fallback and inference loaders.
-- FlashAttention 2 is optional. If it is missing or incompatible, use the `train` extra without `fa2` and let the stack fall back to the available attention backend.
