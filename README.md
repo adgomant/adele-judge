@@ -186,6 +186,14 @@ Run leave-one-model-out preparation or training:
 uv run adele-judge lomo --config configs/adele_judge_qwen3_8b.yaml
 ```
 
+To force a clean dataset rebuild before training:
+
+```bash
+uv run adele-judge train \
+  --config configs/adele_judge_qwen3_8b.yaml \
+  --force-prepare
+```
+
 ## Configuration
 
 The main config is [configs/adele_judge_qwen3_8b.yaml](configs/adele_judge_qwen3_8b.yaml). Most behavior is controlled there: data paths, column names, filters, split policy, model, prompt, training settings, and inference settings.
@@ -255,6 +263,8 @@ Use `scripts/debug_tokenization.py` before long runs to verify label masking on 
 
 Training writes `inference_config.yaml` with `model.adapter_path` pointing at the saved adapter. Prediction also auto-loads `runs/<run>/adapter` when it exists, which avoids accidentally evaluating the base model after a training run.
 
+The default training config uses a small validation monitor subset during training. Run full validation/test prediction and evaluation after training with the generated `inference_config.yaml`.
+
 ## Inference
 
 Default prediction does not use free-form generation. For each example, the pipeline scores the explicit continuations:
@@ -284,25 +294,19 @@ The evaluator reports:
 
 ## Run Artifacts
 
-Each run writes to `runs/{run_name}/`:
+Preparation and training write to `runs/{run_name}/`:
 
 ```text
 config.yaml
 prepared/train.parquet
 prepared/validation.parquet
 prepared/test.parquet
+prepared/prepared_fingerprint.json
+tokenized/
 adapter/
 tokenizer/
 train_metrics.json
-validation_metrics.json
-test_metrics.json
-predictions_validation.parquet
-predictions_test.parquet
-per_model_metrics.csv
-per_benchmark_metrics.csv
-per_task_metrics.csv
-confusion_matrix_ordinal.csv
-confusion_matrix_binary.csv
+validation_trainer_metrics.json
 length_statistics.json
 dataset_filtering_report.json
 token_supervision_debug.txt
@@ -313,7 +317,27 @@ run_metadata.json
 inference_config.yaml
 ```
 
-Some reports are also saved with split-specific filenames, for example `validation_per_model_metrics.csv`.
+Prediction and evaluation add split-specific artifacts such as:
+
+```text
+predictions_validation.parquet
+predictions_test.parquet
+validation_metrics.json
+test_metrics.json
+majority_baseline_validation.json
+majority_baseline_test.json
+majority_ordinal_baseline_validation.json
+majority_ordinal_baseline_test.json
+confusion_matrix_ordinal_validation.csv
+confusion_matrix_binary_validation.csv
+validation_per_model_metrics.csv
+validation_per_benchmark_metrics.csv
+validation_per_task_metrics.csv
+validation_per_target_score_metrics.csv
+validation_per_response_length_bucket_metrics.csv
+```
+
+Some reports are also saved with non-split-specific convenience filenames, for example `per_model_metrics.csv` and `confusion_matrix_ordinal.csv`, and will reflect the most recently evaluated split.
 
 `dataset_filtering_report.json` includes both response-cap removals and full-sequence overflow counts. It also records the effective prompt budget, computed as `training.max_seq_length - data.filters.max_response_tokens`, to make length pressure easy to diagnose.
 
@@ -332,6 +356,7 @@ uv run ruff check .
 ```
 
 The tests cover target construction, split leakage checks, prompt formatting, supervised label masking, packing behavior, and metrics.
+They also cover thinking-mode chat-template handling, leave-one-model-out split behavior, score-token contracts, fast batched inference, and configurable attention implementation.
 
 ## Notes For Operators
 
