@@ -164,6 +164,12 @@ Train the judge:
 uv run adele-judge train --config configs/adele_judge_qwen3_8b.yaml
 ```
 
+Train a finalist adapter on all prepared rows:
+
+```bash
+uv run adele-judge train --config configs/adele_judge_qwen3_8b.yaml --finalist
+```
+
 Run restricted-continuation prediction:
 
 ```bash
@@ -265,6 +271,8 @@ Training writes `inference_config.yaml` with `model.adapter_path` pointing at th
 
 The default training config uses a validation monitor subset during training, stratified by `model_id` and `target_score`. Run full validation/test prediction and evaluation after training with the generated `inference_config.yaml`.
 
+Finalist training is enabled with `--finalist`. It trains on the union of the prepared train, validation, and test splits, disables Trainer evaluation, and skips validation trainer metrics. Use a distinct `project.run_name` or output directory when you want to preserve artifacts from earlier validation runs.
+
 ## Inference
 
 Default prediction does not use free-form generation. For each example, the pipeline scores the explicit continuations:
@@ -319,6 +327,8 @@ run_metadata.json
 inference_config.yaml
 ```
 
+`validation_trainer_metrics.json` is written only for standard training runs with validation monitoring enabled.
+
 Prediction and evaluation add split-specific artifacts such as:
 
 ```text
@@ -366,6 +376,7 @@ They also cover thinking-mode chat-template handling, leave-one-model-out split 
 - The default response cap is `3072`, while the default full sequence length is `4096`.
 - Validation models, and any configured test models, must not appear in the training split. `test_models` may be empty for validation-only runs.
 - In leave-one-model-out mode, the held-out model is reserved for test; validation is sampled from training-side models for monitoring.
+- In finalist training mode, all prepared splits are merged for training and no held-out validation metrics are produced.
 - Long examples are filtered or rejected; they are not silently truncated.
 - Adapter loading for inference is controlled by `model.adapter_path`, with auto-resolution to the run adapter when present.
 - Zero-shot scoring can be run by omitting `model.adapter_path` and using the same restricted continuation scorer.

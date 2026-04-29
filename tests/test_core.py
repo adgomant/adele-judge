@@ -4,6 +4,7 @@ import math
 import sys
 
 import pandas as pd
+import pytest
 from typer.testing import CliRunner
 
 from adele_judge.cli import app
@@ -33,8 +34,14 @@ from adele_judge.tokenization import (
     tokenize_supervised_example,
     validate_score_tokenization,
 )
-from adele_judge.train import pack_tokenized_rows, select_eval_subset
-from adele_judge.train import make_score_compute_metrics, make_score_logits_preprocessor
+from adele_judge.train import (
+    finalist_training_dataframe,
+    make_score_compute_metrics,
+    make_score_logits_preprocessor,
+    pack_tokenized_rows,
+    select_eval_subset,
+    training_args_kwargs,
+)
 from adele_judge.utils import tee_output
 
 
@@ -230,6 +237,29 @@ def test_fixed_split_allows_empty_test_models():
     assert splits["test"].empty
     assert set(splits["train"]["model_id"]) == {"m1", "m3"}
     assert splits["validation"]["model_id"].tolist() == ["m2"]
+
+
+def test_finalist_training_dataframe_includes_all_configured_splits():
+    df = construct_targets(canonicalize_columns(raw_df(), config()))
+    splits = fixed_by_model_split(df, config())
+    combined = finalist_training_dataframe(splits)
+    assert combined["model_id"].tolist() == ["m1", "m2", "m3"]
+
+
+def test_finalist_training_dataframe_tolerates_empty_validation_and_test():
+    df = construct_targets(canonicalize_columns(raw_df(), config()))
+    empty = df.iloc[0:0]
+    combined = finalist_training_dataframe(
+        {"train": df.iloc[[0]], "validation": empty, "test": empty}
+    )
+    assert combined["model_id"].tolist() == ["m1"]
+
+
+def test_finalist_training_dataframe_rejects_empty_training_pool():
+    df = construct_targets(canonicalize_columns(raw_df(), config()))
+    empty = df.iloc[0:0]
+    with pytest.raises(ValueError, match="Finalist mode found no examples"):
+        finalist_training_dataframe({"train": empty, "validation": empty, "test": empty})
 
 
 def test_lomo_split_reserves_held_out_for_test_only():
@@ -429,6 +459,35 @@ def test_eval_subset_can_be_stratified_by_model_and_score():
     assert (subset.groupby(["model_id", "target_score"]).size() == 2).all()
 
 
+def test_training_args_disable_eval_for_finalist_mode(tmp_path):
+    cfg = config()
+    cfg["training"].update(
+        {
+            "num_train_epochs": 1,
+            "per_device_train_batch_size": 2,
+            "per_device_eval_batch_size": 3,
+            "gradient_accumulation_steps": 4,
+            "learning_rate": 1.0e-4,
+            "lr_scheduler_type": "cosine",
+            "weight_decay": 0.0,
+            "optim": "adamw_torch",
+            "logging_steps": 5,
+            "eval_steps": 6,
+            "save_steps": 7,
+            "save_total_limit": 8,
+            "dtype": "float32",
+            "warmup_steps": 0,
+        }
+    )
+    standard = training_args_kwargs(cfg, tmp_path, 42, evaluation_enabled=True)
+    finalist = training_args_kwargs(cfg, tmp_path, 42, evaluation_enabled=False)
+
+    assert standard["eval_strategy"] == "steps"
+    assert standard["eval_steps"] == 6
+    assert finalist["eval_strategy"] == "no"
+    assert "eval_steps" not in finalist
+
+
 def test_score_tokenization_contract_and_fast_inference():
     tokenizer = FakeTokenizer()
     report = validate_score_tokenization(tokenizer, ["1", "2", "3", "4", "5"])
@@ -528,3 +587,9 @@ def test_cli_exposes_pipeline_commands():
     assert result.exit_code == 0
     for command in ["prepare", "train", "predict", "evaluate", "debug-tokenization", "lomo"]:
         assert command in result.stdout
+
+
+def test_train_cli_exposes_finalist_flag():
+    result = runner.invoke(app, ["train", "--help"])
+    assert result.exit_code == 0
+    assert "--finalist" in result.stdout

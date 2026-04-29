@@ -114,6 +114,13 @@ def train(
             help="Rebuild prepared splits before training.",
         ),
     ] = False,
+    finalist: Annotated[
+        bool,
+        typer.Option(
+            "--finalist",
+            help="Train on all prepared splits and disable validation monitoring.",
+        ),
+    ] = False,
     override: OverrideOption = None,
 ) -> None:
     """Train the judge adapter."""
@@ -124,9 +131,12 @@ def train(
         console.print(f"[bold]Run:[/] {run_name}")
         console.print(f"[bold]Output:[/] {project_output_dir(run_config)}")
         console.print(f"[bold]Log:[/] {log_path}")
-        metrics = train_judge(run_config, force_prepare=force_prepare)
+        if finalist:
+            console.print("[bold]Mode:[/] finalist")
+        metrics = train_judge(run_config, force_prepare=force_prepare, finalist=finalist)
         _print_metrics(metrics["train_metrics"], "Training Metrics")
-        _print_metrics(metrics["validation_trainer_metrics"], "Validation Trainer Metrics")
+        if not finalist:
+            _print_metrics(metrics["validation_trainer_metrics"], "Validation Trainer Metrics")
         console.print("[green]Training complete.[/]")
 
 

@@ -409,7 +409,70 @@ def score_class_weights(train_df: Any, config: dict[str, Any]) -> list[float] | 
     return weights
 
 
-def train_judge(config: dict[str, Any], force_prepare: bool = False) -> dict[str, Any]:
+FINALIST_SOURCE_SPLITS = ("train", "validation", "test")
+
+
+def source_split_counts(splits: dict[str, Any]) -> dict[str, int]:
+    return {name: int(len(splits[name])) for name in FINALIST_SOURCE_SPLITS if name in splits}
+
+
+def finalist_training_dataframe(splits: dict[str, Any]) -> Any:
+    chunks = [
+        splits[name]
+        for name in FINALIST_SOURCE_SPLITS
+        if name in splits and not splits[name].empty
+    ]
+    if not chunks:
+        raise ValueError("Finalist mode found no examples across train, validation, and test splits")
+    return pd.concat(chunks, ignore_index=True)
+
+
+def training_args_kwargs(
+    config: dict[str, Any],
+    output_dir: Path,
+    seed: int,
+    *,
+    evaluation_enabled: bool,
+) -> dict[str, Any]:
+    training = config["training"]
+    kwargs = {
+        "output_dir": str(output_dir / "checkpoints"),
+        "num_train_epochs": float(training["num_train_epochs"]),
+        "per_device_train_batch_size": int(training["per_device_train_batch_size"]),
+        "per_device_eval_batch_size": int(training["per_device_eval_batch_size"]),
+        "gradient_accumulation_steps": int(training["gradient_accumulation_steps"]),
+        "learning_rate": float(training["learning_rate"]),
+        "lr_scheduler_type": training["lr_scheduler_type"],
+        "weight_decay": float(training["weight_decay"]),
+        "optim": training["optim"],
+        "logging_steps": int(training["logging_steps"]),
+        "save_steps": int(training["save_steps"]),
+        "save_total_limit": int(training["save_total_limit"]),
+        "eval_strategy": "steps" if evaluation_enabled else "no",
+        "save_strategy": "steps",
+        "train_sampling_strategy": training.get("train_sampling_strategy", "group_by_length"),
+        "length_column_name": training.get("length_column_name", "length"),
+        "remove_unused_columns": False,
+        "report_to": [],
+        "seed": seed,
+        "bf16": str(training.get("dtype", "")).lower() in {"bf16", "bfloat16"},
+        "fp16": str(training.get("dtype", "")).lower() in {"fp16", "float16"},
+    }
+    if evaluation_enabled:
+        kwargs["eval_steps"] = int(training["eval_steps"])
+    if "warmup_steps" in training:
+        kwargs["warmup_steps"] = int(training["warmup_steps"])
+    elif "warmup_ratio" in training:
+        kwargs["warmup_ratio"] = float(training["warmup_ratio"])
+    return kwargs
+
+
+def train_judge(
+    config: dict[str, Any],
+    force_prepare: bool = False,
+    *,
+    finalist: bool = False,
+) -> dict[str, Any]:
     seed = int(config["training"].get("seed", config["project"].get("seed", 42)))
     set_seed(seed)
     output_dir = ensure_dir(project_output_dir(config))
@@ -417,7 +480,10 @@ def train_judge(config: dict[str, Any], force_prepare: bool = False) -> dict[str
     from transformers import Trainer, TrainingArguments
 
     splits = load_or_prepare_splits(config, tokenizer, force_prepare=force_prepare)
-    eval_split = select_eval_subset(splits["validation"], config)
+    split_counts = source_split_counts(splits)
+    evaluation_enabled = not finalist
+    training_df = finalist_training_dataframe(splits) if finalist else splits["train"]
+    eval_split = None if finalist else select_eval_subset(splits["validation"], config)
     allowed_scores = [
         str(score) for score in config["inference"].get("allowed_scores", ["1", "2", "3", "4", "5"])
     ]
@@ -429,43 +495,24 @@ def train_judge(config: dict[str, Any], force_prepare: bool = False) -> dict[str
     )
     write_json(output_dir / "score_tokenization_report.json", score_report)
 
-    train_dataset = load_or_tokenize_dataset("train", splits["train"], tokenizer, config, output_dir)
-    eval_dataset = load_or_tokenize_dataset("validation_monitor", eval_split, tokenizer, config, output_dir)
-    training = config["training"]
+    train_split_name = "train_finalist" if finalist else "train"
+    train_dataset = load_or_tokenize_dataset(train_split_name, training_df, tokenizer, config, output_dir)
+    eval_dataset = None
+    if evaluation_enabled and eval_split is not None:
+        eval_dataset = load_or_tokenize_dataset(
+            "validation_monitor",
+            eval_split,
+            tokenizer,
+            config,
+            output_dir,
+        )
 
-    training_args_kwargs = {
-        "output_dir": str(output_dir / "checkpoints"),
-        "num_train_epochs": float(training["num_train_epochs"]),
-        "per_device_train_batch_size": int(training["per_device_train_batch_size"]),
-        "per_device_eval_batch_size": int(training["per_device_eval_batch_size"]),
-        "gradient_accumulation_steps": int(training["gradient_accumulation_steps"]),
-        "learning_rate": float(training["learning_rate"]),
-        "lr_scheduler_type": training["lr_scheduler_type"],
-        "weight_decay": float(training["weight_decay"]),
-        "optim": training["optim"],
-        "logging_steps": int(training["logging_steps"]),
-        "eval_steps": int(training["eval_steps"]),
-        "save_steps": int(training["save_steps"]),
-        "save_total_limit": int(training["save_total_limit"]),
-        "eval_strategy": "steps",
-        "save_strategy": "steps",
-        "train_sampling_strategy": training.get("train_sampling_strategy", "group_by_length"),
-        "length_column_name": training.get("length_column_name", "length"),
-        "remove_unused_columns": False,
-        "report_to": [],
-        "seed": seed,
-        "bf16": str(training.get("dtype", "")).lower() in {"bf16", "bfloat16"},
-        "fp16": str(training.get("dtype", "")).lower() in {"fp16", "float16"},
-    }
-    if "warmup_steps" in training:
-        training_args_kwargs["warmup_steps"] = int(training["warmup_steps"])
-    elif "warmup_ratio" in training:
-        training_args_kwargs["warmup_ratio"] = float(training["warmup_ratio"])
-
-    args = TrainingArguments(**training_args_kwargs)
+    args = TrainingArguments(
+        **training_args_kwargs(config, output_dir, seed, evaluation_enabled=evaluation_enabled)
+    )
     trainer_class = Trainer
     score_token_ids: list[int] | None = None
-    class_weights = score_class_weights(splits["train"], config)
+    class_weights = score_class_weights(training_df, config)
     compute_metrics = None
     preprocess_logits_for_metrics = None
     metric_score_token_ids = [
@@ -500,7 +547,7 @@ def train_judge(config: dict[str, Any], force_prepare: bool = False) -> dict[str
     )
     result = trainer.train()
     metrics = result.metrics
-    eval_metrics = trainer.evaluate()
+    eval_metrics = trainer.evaluate() if evaluation_enabled else {}
 
     adapter_dir = output_dir / "adapter"
     tokenizer_dir = output_dir / "tokenizer"
@@ -510,7 +557,8 @@ def train_judge(config: dict[str, Any], force_prepare: bool = False) -> dict[str
     inference_config["model"]["adapter_path"] = str(adapter_dir)
     save_config(inference_config, output_dir / "inference_config.yaml")
     write_json(output_dir / "train_metrics.json", _jsonable(metrics))
-    write_json(output_dir / "validation_trainer_metrics.json", _jsonable(eval_metrics))
+    if evaluation_enabled:
+        write_json(output_dir / "validation_trainer_metrics.json", _jsonable(eval_metrics))
     write_json(output_dir / "trainer_log_history.json", trainer.state.log_history)
     write_json(output_dir / "resolved_training_args.json", args.to_dict())
     write_json(
@@ -520,9 +568,13 @@ def train_judge(config: dict[str, Any], force_prepare: bool = False) -> dict[str
             "package_versions": package_versions(),
             "training_objective": objective,
             "training_backend": getattr(model, "adele_training_backend", None),
+            "training_mode": "finalist" if finalist else "standard",
             "score_token_ids": score_token_ids,
             "score_class_weights": class_weights,
-            "validation_monitor_examples": int(len(eval_split)),
+            "source_split_counts": split_counts,
+            "training_examples": int(len(training_df)),
+            "evaluation_enabled": evaluation_enabled,
+            "validation_monitor_examples": int(len(eval_split)) if eval_split is not None else 0,
             "validation_full_examples": int(len(splits["validation"])),
         },
     )
