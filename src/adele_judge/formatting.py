@@ -19,15 +19,14 @@ def clean_value(value: Any, fallback: str = "N/A") -> str:
 def build_user_message(example: dict[str, Any]) -> str:
     return "\n\n".join(
         [
-            f"Benchmark:\n{clean_value(example.get('benchmark'))}",
-            f"Task:\n{clean_value(example.get('task'))}",
-            f"Question:\n{clean_value(example.get('question'))}",
-            f"Reference answer:\n{clean_value(example.get('reference_answer'))}",
-            f"Model response:\n{clean_value(example.get('response'), fallback='')}",
-            "Score:",
+            #f"### Benchmark\n{clean_value(example.get('benchmark'))}",
+            #f"### Task\n{clean_value(example.get('task'))}",
+            f"### QUESTION\n{clean_value(example.get('question'))}",
+            f"### REFERENCE ANSWER\n{clean_value(example.get('reference_answer'))}",
+            f"### MODEL RESPONSE\n{clean_value(example.get('response'), fallback='')}",
+            "### SCORE\n",
         ]
     )
-
 
 def build_messages(
     example: dict[str, Any],

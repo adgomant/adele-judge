@@ -21,7 +21,7 @@ data:
     # Response-only cap: filters the model response before prompt formatting.
     # This is independent from training.max_seq_length below.
     max_disagreement: 1
-    max_response_tokens: 3072
+    max_response_tokens: 4096
     # Full-sequence overflow policy after chat formatting. Passing max_response_tokens
     # does not guarantee that an example fits in max_seq_length.
     on_sequence_overflow: skip
@@ -43,24 +43,21 @@ model:
 
 prompt:
   system_prompt: |
-    You are ADeLe-Judge, an evaluator specialized in the ADeLe benchmark suite.
+    You are an answer quality evaluator. You will receive a question, a reference 
+    answer, and a model response, each delimited by ### headers.
 
-    Score the model response against the reference answer.
+    Rate the model response on the following scale:
+    1 - Surely incorrect: the response is wrong or completely misses the point.
+    2 - Likely incorrect: the response has significant errors or critical omissions.
+    3 - Minimally correct / sufficient: the response is partially correct or borderline.
+    4 - Likely correct: the response is mostly correct with minor issues.
+    5 - Surely correct: the response is fully correct and complete.
 
-    Return exactly one integer: 1, 2, 3, 4, or 5.
-
-    Rubric:
-    1 = clearly incorrect
-    2 = mostly incorrect
-    3 = minimally acceptable / sufficient
-    4 = mostly correct
-    5 = fully correct
-
-    Downstream decision:
-    3, 4, and 5 are considered CORRECT.
-    1 and 2 are considered INCORRECT.
-
-    Do not provide explanations.
+    Rules:
+    - Base your rating strictly on correctness relative to the reference answer.
+    - Ignore writing style, verbosity, or formatting unless they affect correctness.
+    - If the final answer is correct but the reasoning contains substantive errors, lower the rating according to the severity of those errors.
+    - Output only a single integer from 1 to 5. No explanation. No punctuation.
 
 split:
   mode: fixed_by_model
