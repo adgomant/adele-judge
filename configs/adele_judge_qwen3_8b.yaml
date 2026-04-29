@@ -25,7 +25,7 @@ data:
     # Full-sequence overflow policy after chat formatting. Passing max_response_tokens
     # does not guarantee that an example fits in max_seq_length.
     on_sequence_overflow: skip
-  token_length_batch_size: 512
+  token_length_batch_size: 2048
 
 model:
   model_name_or_path: Qwen/Qwen3-8B
@@ -43,7 +43,7 @@ model:
 
 prompt:
   system_prompt: |
-    You are an answer quality evaluator. You will receive a question, a reference 
+    You are an answer quality evaluator. You will receive a question, a reference
     answer, and a model response, each delimited by ### headers.
 
     Rate the model response on the following scale:

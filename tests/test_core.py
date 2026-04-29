@@ -24,7 +24,7 @@ from adele_judge.formatting import (
     format_prompt,
 )
 from adele_judge.metrics import all_metrics, majority_binary_baseline
-from adele_judge.inference import score_allowed_continuations_batch
+from adele_judge.inference import predict_dataframe, score_allowed_continuations_batch
 from adele_judge.metrics import majority_ordinal_baseline
 from adele_judge.modeling import model_from_pretrained_kwargs
 from adele_judge.splits import fixed_by_model_split, lomo_split
@@ -222,6 +222,16 @@ def test_fixed_split_auto_train_models_has_no_leakage():
     assert splits["test"]["model_id"].tolist() == ["m3"]
 
 
+def test_fixed_split_allows_empty_test_models():
+    cfg = config()
+    cfg["split"]["test_models"] = []
+    df = construct_targets(canonicalize_columns(raw_df(), cfg))
+    splits = fixed_by_model_split(df, cfg)
+    assert splits["test"].empty
+    assert set(splits["train"]["model_id"]) == {"m1", "m3"}
+    assert splits["validation"]["model_id"].tolist() == ["m2"]
+
+
 def test_lomo_split_reserves_held_out_for_test_only():
     df = construct_targets(canonicalize_columns(raw_df(), config()))
     splits = lomo_split(df, "m3", validation_fraction=0.5, seed=7)
@@ -237,8 +247,8 @@ def test_formatting_omits_hidden_training_metadata():
     assert "score_gpt4o" not in message
     assert "model_id" not in message
     assert "target_score" not in message
-    assert "Question:" in message
-    assert "Reference answer:" in message
+    assert "### QUESTION" in message
+    assert "### REFERENCE ANSWER" in message
 
 
 def test_supervised_labels_only_cover_score_digit():
@@ -431,6 +441,19 @@ def test_score_tokenization_contract_and_fast_inference():
     )
     assert [row["pred_score"] for row in scored] == [5, 5]
     assert {row["scoring_method"] for row in scored} == {"single_forward_single_token"}
+
+
+def test_empty_prediction_dataframe_keeps_report_columns():
+    cfg = config()
+    cfg["inference"]["allowed_scores"] = ["1", "2", "3", "4", "5"]
+    predictions = predict_dataframe(
+        pd.DataFrame(columns=["target_score", "target_binary"]),
+        AlwaysFiveModel(),
+        FakeTokenizer(),
+        cfg,
+    )
+    assert predictions.empty
+    assert {"target_score", "pred_score", "prob_5", "logprob_5"} <= set(predictions.columns)
 
 
 def test_eval_score_metrics_use_reduced_score_logits():

@@ -36,8 +36,6 @@ def fixed_by_model_split(df: pd.DataFrame, config: dict[str, Any]) -> dict[str, 
 
     if not validation_models:
         raise ValueError("validation_models must not be empty")
-    if not test_models:
-        raise ValueError("test_models must not be empty")
     _validate_disjoint(train_models, validation_models, test_models)
 
     missing = (train_models | validation_models | test_models) - all_models

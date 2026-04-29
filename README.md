@@ -364,7 +364,7 @@ They also cover thinking-mode chat-template handling, leave-one-model-out split 
 
 - The processed parquet already contains a `response_tokens` column, but this pipeline recomputes response lengths with the selected tokenizer.
 - The default response cap is `3072`, while the default full sequence length is `4096`.
-- Validation and test models must not appear in the training split.
+- Validation models, and any configured test models, must not appear in the training split. `test_models` may be empty for validation-only runs.
 - In leave-one-model-out mode, the held-out model is reserved for test; validation is sampled from training-side models for monitoring.
 - Long examples are filtered or rejected; they are not silently truncated.
 - Adapter loading for inference is controlled by `model.adapter_path`, with auto-resolution to the run adapter when present.

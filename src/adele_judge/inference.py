@@ -68,6 +68,29 @@ def _normalize_logprobs(
     }
 
 
+def _empty_prediction_frame(allowed_scores: list[str]) -> pd.DataFrame:
+    columns = [
+        "pred_score",
+        "pred_binary",
+        "target_score",
+        "target_binary",
+        "model_id",
+        "benchmark",
+        "task",
+        "example_id",
+        "response_token_length",
+        "sequence_length",
+        "prompt_token_length_inference",
+        "score_margin",
+        "score_entropy",
+        "scoring_method",
+        "candidate_token_ids",
+    ]
+    for score in allowed_scores:
+        columns.extend([f"logprob_{score}", f"prob_{score}"])
+    return pd.DataFrame(columns=columns)
+
+
 def score_allowed_continuations(
     model: Any,
     tokenizer: Any,
@@ -184,6 +207,8 @@ def predict_dataframe(
     batch_size = int(config["inference"].get("batch_size", 1))
     configure_tokenizer_thinking_mode(tokenizer, config)
     validate_score_tokenization(tokenizer, allowed_scores)
+    if df.empty:
+        return _empty_prediction_frame(allowed_scores)
     rows = []
     starts = range(0, len(df), batch_size)
     for start in track(
