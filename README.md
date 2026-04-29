@@ -170,6 +170,14 @@ Train a finalist adapter on all prepared rows:
 uv run adele-judge train --config configs/adele_judge_qwen3_8b.yaml --finalist
 ```
 
+Stage and upload a trained judge to the Hugging Face Hub:
+
+```bash
+uv run adele-judge push-to-hub \
+  --config runs/qwen3_8b_adele_judge/inference_config.yaml \
+  --repo-id USER_OR_ORG/MODEL_NAME
+```
+
 Run restricted-continuation prediction:
 
 ```bash
@@ -213,6 +221,21 @@ uv run adele-judge prepare \
   --override training.max_seq_length=8192
 ```
 
+Hub packaging can be configured in YAML or via CLI flags:
+
+```yaml
+hub:
+  repo_id: USER_OR_ORG/MODEL_NAME
+  private: false
+  commit_message: Upload ADeLe distilled judge
+  local_checkpoint_dir: runs/qwen3_8b_adele_judge
+  output_staging_dir: hub_staging/qwen3_8b_adele_judge
+  create_pr: false
+  max_shard_size: 5GB
+```
+
+Use `--no-push` to build the Hub staging directory without uploading.
+
 The default column mapping is:
 
 ```yaml
@@ -243,7 +266,7 @@ data:
 10. Create model-held-out splits.
 11. Write a preparation fingerprint so stale prepared splits are rebuilt when relevant settings change.
 
-`data.filters.max_response_tokens` and `training.max_seq_length` are intentionally separate gates. The response cap applies only to the model response before prompt formatting. The sequence cap applies later to the full chat-formatted training example, including the system prompt, benchmark/task metadata, question, reference answer, response, chat-template tokens, and score target. Passing the response cap does not guarantee that an example fits in `max_seq_length`.
+`data.filters.max_response_tokens` and `training.max_seq_length` are intentionally separate gates. The response cap applies only to the model response before prompt formatting. The sequence cap applies later to the full chat-formatted training example, including the system prompt, question, reference answer, response, chat-template tokens, and score target. Passing the response cap does not guarantee that an example fits in `max_seq_length`.
 
 ## Training Behavior
 
@@ -282,6 +305,46 @@ Default prediction does not use free-form generation. For each example, the pipe
 ```
 
 When all score continuations are single-token, inference uses one batched forward pass per prompt batch and gathers the five score-token log probabilities from the prompt-final logits. If a continuation is multi-token, the code falls back to exact continuation scoring. The highest-probability continuation becomes `pred_score`, and `pred_binary` is derived with the fixed threshold.
+
+## Hugging Face Hub Packaging
+
+`adele-judge push-to-hub` prepares a Hub model repository from a trained local run. The command requires the run adapter at `runs/<run>/adapter`, prefers the run tokenizer at `runs/<run>/tokenizer`, merges the LoRA adapter into the base model at the repository root, and also copies the original adapter to `adapter/`.
+
+The uploaded repo includes:
+
+```text
+config.json / model shards / tokenizer files
+generation_config.json
+README.md
+adele_judge_pipeline.py
+adele_judge_config.json
+adele_judge_metadata.json
+adapter/
+training_config.yaml
+```
+
+The recommended Hub-side inference path is restricted continuation scoring:
+
+```python
+from transformers import pipeline
+
+judge = pipeline(
+    "adele-judge",
+    model="USER_OR_ORG/MODEL_NAME",
+    trust_remote_code=True,
+    device_map="auto",
+)
+result = judge(
+    {"question": "...", "reference_answer": "...", "model_response": "..."}
+)
+
+results = judge([
+    {"question": "...", "reference_answer": "...", "model_response": "..."},
+    {"question": "...", "ground_truth": "...", "model_response": "..."},
+], batch_size=8)
+```
+
+The generated `generation_config.json` uses safe one-token defaults for debugging. `generate()` is not the recommended prediction method.
 
 ## Metrics
 

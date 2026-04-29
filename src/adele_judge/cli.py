@@ -217,6 +217,55 @@ def evaluate(
     console.print("[green]Evaluation reports updated.[/]")
 
 
+@app.command("push-to-hub")
+def push_to_hub(
+    config: ConfigOption,
+    repo_id: Annotated[
+        str | None,
+        typer.Option("--repo-id", help="Hugging Face Hub repo ID, e.g. USER_OR_ORG/MODEL."),
+    ] = None,
+    private: Annotated[
+        bool | None,
+        typer.Option("--private/--public", help="Create the Hub repo as private or public."),
+    ] = None,
+    commit_message: Annotated[
+        str | None,
+        typer.Option("--commit-message", help="Hub commit message."),
+    ] = None,
+    staging_dir: Annotated[
+        Path | None,
+        typer.Option("--staging-dir", help="Local staging directory for Hub files."),
+    ] = None,
+    create_pr: Annotated[
+        bool | None,
+        typer.Option("--create-pr/--no-create-pr", help="Upload as a Hub pull request."),
+    ] = None,
+    no_push: Annotated[
+        bool,
+        typer.Option("--no-push", help="Stage files locally without uploading to the Hub."),
+    ] = False,
+    override: OverrideOption = None,
+) -> None:
+    """Stage and upload a trained judge to the Hugging Face Hub."""
+    from .hub import push_trained_judge_to_hub
+
+    run_config = _load_config(config, override)
+    result = push_trained_judge_to_hub(
+        run_config,
+        repo_id=repo_id,
+        private=private,
+        commit_message=commit_message,
+        staging_dir=staging_dir,
+        create_pr=create_pr,
+        no_push=no_push,
+    )
+    console.print(f"[bold]Staging:[/] {result.staging_dir}")
+    if result.pushed:
+        console.print(f"[green]Uploaded[/] {result.repo_id}: {result.url}")
+    else:
+        console.print(f"[yellow]Staged only; not pushed.[/] Repo target: {result.repo_id}")
+
+
 @app.command("debug-tokenization")
 def debug_tokenization(
     config: ConfigOption,

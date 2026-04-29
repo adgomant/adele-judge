@@ -124,3 +124,12 @@ inference:
 
 evaluation:
   length_buckets: [0, 256, 512, 1024, 2048, 3072, 4096, 1000000000]
+
+hub:
+  repo_id: null
+  private: false
+  commit_message: Upload ADeLe distilled judge
+  local_checkpoint_dir: null
+  output_staging_dir: null
+  create_pr: false
+  max_shard_size: 5GB

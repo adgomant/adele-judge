@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import math
 import sys
+from types import SimpleNamespace
 
 import pandas as pd
 import pytest
@@ -24,6 +25,15 @@ from adele_judge.formatting import (
     configure_tokenizer_thinking_mode,
     format_prompt,
 )
+from adele_judge.hub import (
+    add_custom_pipeline_metadata,
+    collect_hub_metadata,
+    render_model_card,
+    resolve_checkpoint_paths,
+    resolve_hub_options,
+    write_generation_config,
+)
+from adele_judge.hub_pipeline import ADeLeJudgePipeline
 from adele_judge.metrics import all_metrics, majority_binary_baseline
 from adele_judge.inference import predict_dataframe, score_allowed_continuations_batch
 from adele_judge.metrics import majority_ordinal_baseline
@@ -42,7 +52,7 @@ from adele_judge.train import (
     select_eval_subset,
     training_args_kwargs,
 )
-from adele_judge.utils import tee_output
+from adele_judge.utils import read_json, tee_output, write_json
 
 
 runner = CliRunner()
@@ -54,6 +64,7 @@ class FakeTokenizer:
     pad_token = "<eos>"
     eos_token = "<eos>"
     chat_template = None
+    padding_side = "right"
 
     def __call__(
         self,
@@ -81,7 +92,15 @@ class FakeTokenizer:
                     "attention_mask": torch.tensor(attention_mask),
                 }
             return {"input_ids": input_ids, "attention_mask": attention_mask}
-        return {"input_ids": [ord(ch) for ch in text]}
+        input_ids = [ord(ch) for ch in text]
+        if return_tensors == "pt":
+            import torch
+
+            return {
+                "input_ids": torch.tensor([input_ids]),
+                "attention_mask": torch.ones((1, len(input_ids)), dtype=torch.long),
+            }
+        return {"input_ids": input_ids, "attention_mask": [1] * len(input_ids)}
 
     def decode(self, ids):
         return "".join(chr(i) for i in ids if i != 0)
@@ -151,16 +170,72 @@ class AlwaysFiveModel:
         import torch
 
         self.param = torch.nn.Parameter(torch.zeros(1))
+        self.calls = 0
+        self.config = SimpleNamespace(
+            task_specific_params=None,
+            _name_or_path=None,
+            _commit_hash=None,
+        )
+        self.name_or_path = ""
+        self.device = self.param.device
 
     def parameters(self):
         yield self.param
 
+    def to(self, device):
+        self.device = device
+        return self
+
+    def eval(self):
+        return self
+
+    def can_generate(self):
+        return False
+
     def __call__(self, input_ids, attention_mask=None):
         import torch
-        from types import SimpleNamespace
 
+        self.calls += 1
         logits = torch.zeros((*input_ids.shape, 128), device=input_ids.device)
         logits[:, :, ord("5")] = 10.0
+        return SimpleNamespace(logits=logits)
+
+
+class BatchIndexScoreModel:
+    def __init__(self):
+        import torch
+
+        self.param = torch.nn.Parameter(torch.zeros(1))
+        self.calls = 0
+        self.config = SimpleNamespace(
+            task_specific_params=None,
+            _name_or_path=None,
+            _commit_hash=None,
+        )
+        self.name_or_path = ""
+        self.device = self.param.device
+
+    def parameters(self):
+        yield self.param
+
+    def to(self, device):
+        self.device = device
+        return self
+
+    def eval(self):
+        return self
+
+    def can_generate(self):
+        return False
+
+    def __call__(self, input_ids, attention_mask=None):
+        import torch
+
+        self.calls += 1
+        logits = torch.zeros((*input_ids.shape, 128), device=input_ids.device)
+        for row_index in range(input_ids.shape[0]):
+            score = min(row_index + 1, 5)
+            logits[row_index, :, ord(str(score))] = 10.0
         return SimpleNamespace(logits=logits)
 
 
@@ -210,6 +285,47 @@ def raw_df():
             "instance_id": ["i1", "i2", "i3"],
         }
     )
+
+
+def hub_config(tmp_path):
+    cfg = config()
+    cfg["project"] = {
+        "run_name": "test-run",
+        "output_dir": str(tmp_path / "run"),
+        "seed": 42,
+    }
+    cfg["model"] = {
+        "model_name_or_path": "Qwen/Qwen3-8B",
+        "revision": None,
+        "attn_implementation": None,
+        "trust_remote_code": True,
+        "thinking_mode": {"enabled": False, "apply_if_supported": True},
+    }
+    cfg["training"].update(
+        {
+            "objective": "restricted_score_ce",
+            "num_train_epochs": 1,
+            "max_seq_length": 2048,
+        }
+    )
+    cfg["inference"].update(
+        {
+            "allowed_scores": ["1", "2", "3", "4", "5"],
+            "binary_threshold": 3,
+            "method": "restricted_continuation_logprobs_fast",
+        }
+    )
+    cfg["hub"] = {
+        "repo_id": "user/test-run",
+        "private": False,
+        "commit_message": "Upload test run",
+        "local_checkpoint_dir": str(tmp_path / "run"),
+        "output_staging_dir": str(tmp_path / "staging"),
+        "create_pr": False,
+        "max_shard_size": "1GB",
+    }
+    normalize_config(cfg)
+    return cfg
 
 
 def test_target_construction_floor_mean_and_binary():
@@ -561,6 +677,247 @@ def test_configurable_attention_implementation_for_transformers_loaders():
     assert "revision" not in kwargs
 
 
+def test_hub_options_resolve_from_config_and_cli_overrides(tmp_path):
+    cfg = hub_config(tmp_path)
+    options = resolve_hub_options(
+        cfg,
+        repo_id="org/override",
+        private=True,
+        commit_message="Custom upload",
+        staging_dir=tmp_path / "custom-staging",
+        create_pr=True,
+        no_push=True,
+    )
+    assert options.repo_id == "org/override"
+    assert options.private is True
+    assert options.commit_message == "Custom upload"
+    assert options.staging_dir == tmp_path / "custom-staging"
+    assert options.create_pr is True
+    assert options.no_push is True
+
+
+def test_hub_options_require_repo_id(tmp_path):
+    cfg = hub_config(tmp_path)
+    cfg["hub"]["repo_id"] = None
+    with pytest.raises(ValueError, match="repo_id"):
+        resolve_hub_options(cfg)
+
+
+def test_hub_checkpoint_requires_adapter(tmp_path):
+    cfg = hub_config(tmp_path)
+    options = resolve_hub_options(cfg)
+    with pytest.raises(FileNotFoundError, match="Run directory"):
+        resolve_checkpoint_paths(options)
+
+    options.run_dir.mkdir()
+    with pytest.raises(FileNotFoundError, match="adapter"):
+        resolve_checkpoint_paths(options)
+
+    (options.run_dir / "adapter").mkdir()
+    paths = resolve_checkpoint_paths(options)
+    assert paths.adapter_dir == options.run_dir / "adapter"
+    assert paths.tokenizer_dir is None
+
+
+def test_hub_generation_config_uses_safe_debug_defaults(tmp_path):
+    path = tmp_path / "generation_config.json"
+    write_generation_config(path)
+    data = read_json(path)
+    assert data["max_new_tokens"] == 1
+    assert data["do_sample"] is False
+
+
+def test_hub_custom_pipeline_metadata_is_written(tmp_path):
+    path = tmp_path / "config.json"
+    write_json(path, {"model_type": "qwen3"})
+    add_custom_pipeline_metadata(path)
+    data = read_json(path)
+    assert data["custom_pipelines"]["adele-judge"]["impl"] == (
+        "adele_judge_pipeline.ADeLeJudgePipeline"
+    )
+    assert data["custom_pipelines"]["adele-judge"]["pt"] == ["AutoModelForCausalLM"]
+
+
+def test_hub_metadata_collects_available_run_artifacts(tmp_path):
+    cfg = hub_config(tmp_path)
+    options = resolve_hub_options(cfg)
+    options.run_dir.mkdir()
+    write_json(options.run_dir / "train_metrics.json", {"train_loss": 0.12})
+    write_json(options.run_dir / "split_report.json", {"train": {"examples": 10}})
+    metadata = collect_hub_metadata(cfg, options.run_dir, options)
+    assert metadata["repo_id"] == "user/test-run"
+    assert metadata["base_model"] == "Qwen/Qwen3-8B"
+    assert metadata["artifacts"]["train_metrics.json"]["train_loss"] == 0.12
+    assert metadata["artifacts"]["split_report.json"]["train"]["examples"] == 10
+
+
+def test_hub_model_card_documents_restricted_scoring(tmp_path):
+    cfg = hub_config(tmp_path)
+    options = resolve_hub_options(cfg)
+    metadata = collect_hub_metadata(cfg, tmp_path / "missing-run", options)
+    card = render_model_card(cfg, metadata, options.repo_id)
+    assert "ADeLe Distilled Judge" in card
+    assert "restricted continuations" in card
+    assert "generate()" in card
+    assert "ADeLe-specific judge" in card
+
+
+def adele_pipeline(model=None, tokenizer=None, *, adele_config=None):
+    return ADeLeJudgePipeline(
+        model=model or AlwaysFiveModel(),
+        tokenizer=tokenizer or FakeTokenizer(),
+        device=-1,
+        adele_config=adele_config
+        or {
+            "prompt": {"system_prompt": "Return one score."},
+            "inference": {"allowed_scores": ["1", "2", "3", "4", "5"], "binary_threshold": 3},
+            "model": {"thinking_mode": {}},
+        },
+    )
+
+
+def test_transformers_pipeline_loads_custom_pipeline_locally():
+    from transformers import PretrainedConfig
+    from transformers import pipeline
+
+    config = PretrainedConfig()
+    config.custom_pipelines = {
+        "adele-judge": {
+            "impl": "adele_judge_pipeline.ADeLeJudgePipeline",
+            "pt": ["AutoModelForCausalLM"],
+            "tf": [],
+            "type": "text",
+        }
+    }
+    pipe = pipeline(
+        "adele-judge",
+        model=AlwaysFiveModel(),
+        config=config,
+        tokenizer=FakeTokenizer(),
+        pipeline_class=ADeLeJudgePipeline,
+        device=-1,
+        adele_config={
+            "prompt": {"system_prompt": "Return one score."},
+            "inference": {"allowed_scores": ["1", "2", "3", "4", "5"], "binary_threshold": 3},
+            "model": {"thinking_mode": {}},
+        },
+    )
+    assert isinstance(pipe, ADeLeJudgePipeline)
+
+
+def test_hub_pipeline_scores_single_dict_with_restricted_continuations():
+    model = AlwaysFiveModel()
+    pipe = adele_pipeline(model=model)
+    result = pipe({"question": "q", "reference_answer": "a", "model_response": "r"})
+    assert result["score"] == 5
+    assert result["label"] == "CORRECT"
+    assert set(result) == {
+        "score",
+        "label",
+        "probs",
+        "logprobs",
+        "confidence",
+        "margin",
+        "entropy",
+    }
+    assert set(result["probs"]) == {"1", "2", "3", "4", "5"}
+    assert set(result["logprobs"]) == {"1", "2", "3", "4", "5"}
+    assert result["confidence"] == max(result["probs"].values())
+    assert model.calls == 1
+
+
+def test_hub_pipeline_prompt_ignores_benchmark_and_task_fields():
+    tokenizer = FakeChatTokenizer()
+    pipe = adele_pipeline(tokenizer=tokenizer)
+    pipe(
+        {
+            "question": "q",
+            "reference_answer": "a",
+            "model_response": "r",
+            "benchmark": "must not appear",
+            "task": "must not appear either",
+        }
+    )
+    rendered_messages = "\n".join(
+        message["content"] for message in tokenizer.calls[-1]["messages"]
+    )
+    assert "must not appear" not in rendered_messages
+    assert "must not appear either" not in rendered_messages
+
+
+def test_hub_pipeline_scores_list_with_standard_batching():
+    model = BatchIndexScoreModel()
+    pipe = adele_pipeline(model=model)
+    results = pipe(
+        [
+            {"question": "q1", "reference_answer": "a1", "model_response": "r1"},
+            {"question": "q2", "ground_truth": "a2", "model_response": "r2"},
+            {"question": "q3", "reference_answer": "a3", "model_response": "r3"},
+        ],
+        batch_size=3,
+    )
+    assert [result["score"] for result in results] == [1, 2, 3]
+    assert [result["label"] for result in results] == ["INCORRECT", "INCORRECT", "CORRECT"]
+    assert model.calls == 1
+
+
+def test_hub_pipeline_validates_required_fields():
+    pipe = adele_pipeline()
+    with pytest.raises(ValueError, match="question"):
+        pipe({"reference_answer": "a", "model_response": "r"})
+    with pytest.raises(ValueError, match="model_response"):
+        pipe({"question": "q", "reference_answer": "a"})
+    with pytest.raises(ValueError, match="reference_answer or ground_truth"):
+        pipe({"question": "q", "model_response": "r"})
+
+
+def test_hub_pipeline_requires_single_token_scores():
+    class MultiTokenScoreTokenizer(FakeTokenizer):
+        def __call__(self, text, *args, **kwargs):
+            if text in {"1", "2", "3", "4", "5"}:
+                return {"input_ids": [ord(text), ord(text)], "attention_mask": [1, 1]}
+            return super().__call__(text, *args, **kwargs)
+
+    with pytest.raises(ValueError, match="single tokens"):
+        adele_pipeline(tokenizer=MultiTokenScoreTokenizer())
+
+
+def test_hub_pipeline_applies_thinking_only_when_supported():
+    supported_tokenizer = FakeThinkingChatTokenizer()
+    supported_pipe = adele_pipeline(
+        tokenizer=supported_tokenizer,
+        adele_config={
+            "prompt": {"system_prompt": "Return one score."},
+            "inference": {"allowed_scores": ["1", "2", "3", "4", "5"], "binary_threshold": 3},
+            "model": {"thinking_mode": {"enabled": False, "apply_if_supported": True}},
+        },
+    )
+    supported_pipe({"question": "q", "reference_answer": "a", "model_response": "r"})
+    assert supported_tokenizer.calls[-1]["enable_thinking"] is False
+
+    unsupported_tokenizer = FakeChatTokenizer()
+    unsupported_pipe = adele_pipeline(
+        tokenizer=unsupported_tokenizer,
+        adele_config={
+            "prompt": {"system_prompt": "Return one score."},
+            "inference": {"allowed_scores": ["1", "2", "3", "4", "5"], "binary_threshold": 3},
+            "model": {"thinking_mode": {"enabled": False, "apply_if_supported": True}},
+        },
+    )
+    unsupported_pipe({"question": "q", "reference_answer": "a", "model_response": "r"})
+    assert unsupported_tokenizer.calls[-1]["kwargs"] == {}
+
+
+def test_hub_pipeline_does_not_generate_by_default():
+    class GenerateFailsModel(AlwaysFiveModel):
+        def generate(self, *args, **kwargs):
+            raise AssertionError("generate should not be called")
+
+    pipe = adele_pipeline(model=GenerateFailsModel())
+    result = pipe({"question": "q", "reference_answer": "a", "model_response": "r"})
+    assert result["score"] == 5
+
+
 def test_tee_output_mirrors_stdout_and_stderr_and_restores_streams(tmp_path, capsys):
     log_path = tmp_path / "training.log"
     original_stdout = sys.stdout
@@ -585,7 +942,15 @@ def test_tee_output_mirrors_stdout_and_stderr_and_restores_streams(tmp_path, cap
 def test_cli_exposes_pipeline_commands():
     result = runner.invoke(app, ["--help"])
     assert result.exit_code == 0
-    for command in ["prepare", "train", "predict", "evaluate", "debug-tokenization", "lomo"]:
+    for command in [
+        "prepare",
+        "train",
+        "predict",
+        "evaluate",
+        "push-to-hub",
+        "debug-tokenization",
+        "lomo",
+    ]:
         assert command in result.stdout
 
 
@@ -593,3 +958,10 @@ def test_train_cli_exposes_finalist_flag():
     result = runner.invoke(app, ["train", "--help"])
     assert result.exit_code == 0
     assert "--finalist" in result.stdout
+
+
+def test_push_to_hub_cli_exposes_packaging_flags():
+    result = runner.invoke(app, ["push-to-hub", "--help"])
+    assert result.exit_code == 0
+    for flag in ["--repo-id", "--private", "--commit-message", "--staging-dir", "--no-push"]:
+        assert flag in result.stdout

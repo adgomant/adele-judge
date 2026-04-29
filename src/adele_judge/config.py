@@ -81,6 +81,15 @@ def normalize_config(config: dict[str, Any]) -> dict[str, Any]:
     split.setdefault("lomo_validation_fraction", 0.05)
     split.setdefault("lomo_validation_max_examples", None)
     split.setdefault("lomo_validation_seed", config.get("project", {}).get("seed", 42))
+
+    hub = config.setdefault("hub", {})
+    hub.setdefault("repo_id", None)
+    hub.setdefault("private", False)
+    hub.setdefault("commit_message", "Upload ADeLe distilled judge")
+    hub.setdefault("local_checkpoint_dir", None)
+    hub.setdefault("output_staging_dir", None)
+    hub.setdefault("create_pr", False)
+    hub.setdefault("max_shard_size", "5GB")
     return config
 
 
