@@ -69,7 +69,6 @@ split:
   #  - o1-mini
   #  - llama3d2-11b
   train_models: auto_except_val_test
-
   held_out_model: null
   # In leave-one-model-out mode, held-out examples are reserved for final test.
   # Validation is sampled from the remaining training-side models for monitoring.
