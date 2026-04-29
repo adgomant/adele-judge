@@ -62,12 +62,12 @@ prompt:
 split:
   mode: fixed_by_model
   validation_models:
-    - o1-mini
-    - llama3d2-11b
-  test_models:
     - gemini-3-flash
     - DK-R1-Dist-Qwen-14B
     - llama3d2-3b
+  #test_models:
+  #  - o1-mini
+  #  - llama3d2-11b
   train_models: auto_except_val_test
 
   held_out_model: null
@@ -95,7 +95,7 @@ training:
   num_train_epochs: 1
   per_device_train_batch_size: 5
   per_device_eval_batch_size: 4
-  gradient_accumulation_steps: 2
+  gradient_accumulation_steps: 3
   warmup_steps: 450
   lr_scheduler_type: cosine
   weight_decay: 0.0
