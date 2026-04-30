@@ -31,6 +31,7 @@ from adele_judge.hub import (
     render_model_card,
     resolve_checkpoint_paths,
     resolve_hub_options,
+    stage_hub_repository,
     write_generation_config,
 )
 from adele_judge.hub_pipeline import ADeLeJudgePipeline
@@ -40,12 +41,16 @@ from adele_judge.metrics import majority_ordinal_baseline
 from adele_judge.modeling import model_from_pretrained_kwargs
 from adele_judge.splits import fixed_by_model_split, lomo_split
 from adele_judge.tokenization import (
+    class_id_to_score,
+    score_to_class_id,
+    tokenize_classification_example,
     supervised_token_debug_rows,
     tokenize_supervised_example,
     validate_score_tokenization,
 )
 from adele_judge.train import (
     finalist_training_dataframe,
+    make_sequence_classification_trainer,
     make_score_compute_metrics,
     make_score_logits_preprocessor,
     pack_tokenized_rows,
@@ -239,6 +244,44 @@ class BatchIndexScoreModel:
         return SimpleNamespace(logits=logits)
 
 
+class BatchIndexClassificationModel:
+    def __init__(self):
+        import torch
+
+        self.param = torch.nn.Parameter(torch.zeros(1))
+        self.calls = 0
+        self.config = SimpleNamespace(
+            task_specific_params=None,
+            _name_or_path=None,
+            _commit_hash=None,
+        )
+        self.name_or_path = ""
+        self.device = self.param.device
+
+    def parameters(self):
+        yield self.param
+
+    def to(self, device):
+        self.device = device
+        return self
+
+    def eval(self):
+        return self
+
+    def can_generate(self):
+        return False
+
+    def __call__(self, input_ids, attention_mask=None):
+        import torch
+
+        self.calls += 1
+        logits = torch.zeros((input_ids.shape[0], 5), device=input_ids.device)
+        for row_index in range(input_ids.shape[0]):
+            class_id = min(row_index, 4)
+            logits[row_index, class_id] = 10.0
+        return SimpleNamespace(logits=logits)
+
+
 def config():
     return {
         "data": {
@@ -419,6 +462,39 @@ def test_supervised_labels_only_cover_score_digit():
     assert [row["token"] for row in rows if row["supervised"]] == ["4"]
 
 
+def test_classification_target_mapping_and_prompt_excludes_label_metadata():
+    example = {
+        "question": "alpha",
+        "reference_answer": "beta",
+        "response": "gamma",
+        "target_score": 5,
+        "target_binary": "CORRECT",
+        "judge_1_score": 5,
+        "judge_2_score": 5,
+        "model_id": "hidden-model",
+    }
+    tok = FakeTokenizer()
+    tokenized = tokenize_classification_example(
+        example,
+        tok,
+        "Return one score.",
+        max_seq_length=10000,
+    )
+
+    assert score_to_class_id(1) == 0
+    assert score_to_class_id(5) == 4
+    assert class_id_to_score(0) == 1
+    assert class_id_to_score(4) == 5
+    assert tokenized is not None
+    assert tokenized.labels == 4
+    rendered = tok.decode(tokenized.input_ids)
+    assert "### SCORE" in rendered
+    assert "5" not in rendered
+    assert "hidden-model" not in rendered
+    assert "judge_1_score" not in rendered
+    assert "target_score" not in rendered
+
+
 def test_qwen3_style_config_applies_non_thinking_when_supported():
     cfg = config()
     cfg["model"] = {"model_name_or_path": "Qwen/Qwen3-8B"}
@@ -540,6 +616,9 @@ def test_metrics_and_majority_baseline():
     assert math.isclose(metrics["ordinal_accuracy"], 0.5)
     assert math.isclose(metrics["within_1_accuracy"], 1.0)
     assert math.isclose(metrics["binary_accuracy"], 0.75)
+    assert metrics["pred_score_counts"] == {"1": 1, "3": 2, "4": 1}
+    assert metrics["target_score_counts"] == {"1": 1, "2": 1, "3": 1, "5": 1}
+    assert metrics["pred_binary_counts"] == {"CORRECT": 3, "INCORRECT": 1}
     baseline = majority_binary_baseline(pred, pred)
     assert baseline["majority_class"] in {"CORRECT", "INCORRECT"}
     ordinal_baseline = majority_ordinal_baseline(pred, pred)
@@ -600,8 +679,19 @@ def test_training_args_disable_eval_for_finalist_mode(tmp_path):
 
     assert standard["eval_strategy"] == "steps"
     assert standard["eval_steps"] == 6
+    assert standard["train_sampling_strategy"] == "random"
     assert finalist["eval_strategy"] == "no"
     assert "eval_steps" not in finalist
+
+
+def test_config_validates_train_sampling_strategy():
+    cfg = config()
+    cfg["project"] = {"seed": 42}
+    cfg["model"] = {"model_name_or_path": "Qwen/Qwen3-8B"}
+    cfg["training"]["train_sampling_strategy"] = "bucketed"
+    normalize_config(cfg)
+    with pytest.raises(ValueError, match="train_sampling_strategy"):
+        validate_config(cfg)
 
 
 def test_score_tokenization_contract_and_fast_inference():
@@ -629,6 +719,30 @@ def test_empty_prediction_dataframe_keeps_report_columns():
     )
     assert predictions.empty
     assert {"target_score", "pred_score", "prob_5", "logprob_5"} <= set(predictions.columns)
+
+
+def test_sequence_classification_prediction_uses_logits_and_score_mapping():
+    cfg = config()
+    cfg["project"] = {"seed": 42}
+    cfg["model"] = {"model_name_or_path": "Qwen/Qwen3-8B"}
+    normalize_config(cfg)
+    cfg["training"]["objective"] = "sequence_classification"
+    cfg["inference"]["allowed_scores"] = ["1", "2", "3", "4", "5"]
+    cfg["inference"]["batch_size"] = 3
+    df = construct_targets(canonicalize_columns(raw_df(), cfg))
+    predictions = predict_dataframe(
+        df,
+        BatchIndexClassificationModel(),
+        FakeTokenizer(),
+        cfg,
+    )
+
+    assert predictions["pred_score"].tolist() == [1, 2, 3]
+    assert predictions["pred_binary"].tolist() == ["INCORRECT", "INCORRECT", "CORRECT"]
+    assert "logit_1" in predictions.columns
+    assert "logprob_1" not in predictions.columns
+    assert predictions["scoring_method"].unique().tolist() == ["sequence_classification_logits"]
+    assert predictions["prob_1"].iloc[0] == predictions[[f"prob_{i}" for i in range(1, 6)]].iloc[0].max()
 
 
 def test_eval_score_metrics_use_reduced_score_logits():
@@ -660,6 +774,55 @@ def test_eval_score_metrics_use_reduced_score_logits():
     assert "expected_calibration_error_10bin" in metrics
 
 
+def test_sequence_classification_losses_match_expected_components():
+    import torch
+    import torch.nn.functional as F
+
+    class BareTrainer:
+        state = SimpleNamespace(global_step=1)
+        args = SimpleNamespace(logging_steps=100)
+
+        def log(self, payload):
+            self.logged = payload
+
+    class LossModel:
+        training = True
+
+        def __call__(self, **kwargs):
+            return SimpleNamespace(
+                logits=torch.tensor(
+                    [
+                        [3.0, 0.0, -1.0, -2.0, -3.0],
+                        [-3.0, -2.0, 0.0, 1.0, 4.0],
+                    ]
+                )
+            )
+
+    inputs = {
+        "input_ids": torch.ones((2, 3), dtype=torch.long),
+        "attention_mask": torch.ones((2, 3), dtype=torch.long),
+        "labels": torch.tensor([0, 4], dtype=torch.long),
+    }
+    trainer_cls = make_sequence_classification_trainer(
+        BareTrainer,
+        {"type": "ce_5way_plus_binary", "lambda_binary": 0.5},
+    )
+    loss = trainer_cls().compute_loss(LossModel(), dict(inputs))
+
+    logits = LossModel()().logits
+    expected_5way = F.cross_entropy(logits, inputs["labels"])
+    expected_binary_logits = torch.stack(
+        [torch.logsumexp(logits[:, :2], dim=-1), torch.logsumexp(logits[:, 2:], dim=-1)],
+        dim=-1,
+    )
+    expected_binary = F.cross_entropy(expected_binary_logits, torch.tensor([0, 1]))
+    assert torch.allclose(loss, expected_5way + 0.5 * expected_binary)
+
+    ce_trainer_cls = make_sequence_classification_trainer(BareTrainer, {"type": "ce_5way"})
+    ce_loss = ce_trainer_cls().compute_loss(LossModel(), dict(inputs))
+    assert torch.allclose(ce_loss, expected_5way)
+
+
 def test_configurable_attention_implementation_for_transformers_loaders():
     cfg = config()
     cfg["project"] = {"seed": 42}
@@ -675,6 +838,39 @@ def test_configurable_attention_implementation_for_transformers_loaders():
     assert kwargs["attn_implementation"] == "flash_attention_2"
     assert kwargs["trust_remote_code"] is True
     assert "revision" not in kwargs
+
+
+def test_config_accepts_sequence_classification_loss_config():
+    cfg = config()
+    cfg["project"] = {"seed": 42}
+    cfg["model"] = {"model_name_or_path": "Qwen/Qwen3-8B"}
+    cfg["inference"]["method"] = "restricted_continuation_logprobs_fast"
+    cfg["training"].update(
+        {
+            "objective": "sequence_classification",
+            "packing": False,
+            "loss": {
+                "type": "ce_5way_plus_binary",
+                "lambda_binary": 0.25,
+                "class_weights": "balanced",
+            },
+        }
+    )
+    normalize_config(cfg)
+    validate_config(cfg)
+    assert cfg["training"]["loss"]["type"] == "ce_5way_plus_binary"
+    assert cfg["inference"]["method"] == "sequence_classification_logits"
+
+
+def test_objective_drives_compatible_inference_method():
+    cfg = config()
+    cfg["project"] = {"seed": 42}
+    cfg["model"] = {"model_name_or_path": "Qwen/Qwen3-8B"}
+    cfg["training"]["objective"] = "restricted_score_ce"
+    cfg["inference"]["method"] = "sequence_classification_logits"
+    normalize_config(cfg)
+    validate_config(cfg)
+    assert cfg["inference"]["method"] == "restricted_continuation_logprobs_fast"
 
 
 def test_hub_options_resolve_from_config_and_cli_overrides(tmp_path):
@@ -749,6 +945,14 @@ def test_hub_metadata_collects_available_run_artifacts(tmp_path):
     assert metadata["base_model"] == "Qwen/Qwen3-8B"
     assert metadata["artifacts"]["train_metrics.json"]["train_loss"] == 0.12
     assert metadata["artifacts"]["split_report.json"]["train"]["examples"] == 10
+
+
+def test_hub_packaging_rejects_sequence_classification_runs(tmp_path):
+    cfg = hub_config(tmp_path)
+    cfg["training"]["objective"] = "sequence_classification"
+    options = resolve_hub_options(cfg)
+    with pytest.raises(NotImplementedError, match="sequence_classification"):
+        stage_hub_repository(cfg, options)
 
 
 def test_hub_model_card_documents_restricted_scoring(tmp_path):

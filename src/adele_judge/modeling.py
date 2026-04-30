@@ -18,6 +18,10 @@ COMMON_LORA_TARGET_MODULES = [
 ]
 
 
+SCORE_ID2LABEL = {index: str(index + 1) for index in range(5)}
+SCORE_LABEL2ID = {label: index for index, label in SCORE_ID2LABEL.items()}
+
+
 SUPPORTED_ATTENTION_IMPLEMENTATIONS = {"eager", "sdpa", "flash_attention_2", "flash_attention_3"}
 
 
@@ -64,6 +68,9 @@ def model_from_pretrained_kwargs(config: dict[str, Any]) -> dict[str, Any]:
 
 
 def load_model_for_training(config: dict[str, Any]) -> tuple[Any, Any]:
+    if config["training"].get("objective") == "sequence_classification":
+        return load_sequence_classification_model_for_training(config)
+
     model_name = config["model"]["model_name_or_path"]
     training = config["training"]
     dtype = torch_dtype_from_name(training.get("dtype"))
@@ -148,7 +155,56 @@ def load_model_for_training_fallback(config: dict[str, Any]) -> tuple[Any, Any]:
     return model, tokenizer
 
 
+def load_sequence_classification_model_for_training(config: dict[str, Any]) -> tuple[Any, Any]:
+    import torch
+    from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
+    from transformers import AutoModelForSequenceClassification, BitsAndBytesConfig
+
+    tokenizer = load_tokenizer(config)
+    training = config["training"]
+    dtype = torch_dtype_from_name(training.get("dtype")) or torch.bfloat16
+    quantization_config = None
+    if bool(training.get("load_in_4bit", True)):
+        quantization_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_compute_dtype=dtype,
+            bnb_4bit_use_double_quant=True,
+        )
+    model = AutoModelForSequenceClassification.from_pretrained(
+        config["model"]["model_name_or_path"],
+        num_labels=5,
+        id2label=SCORE_ID2LABEL,
+        label2id=SCORE_LABEL2ID,
+        torch_dtype=dtype,
+        quantization_config=quantization_config,
+        device_map="auto",
+        **model_from_pretrained_kwargs(config),
+    )
+    model.config.pad_token_id = tokenizer.pad_token_id
+    model.config.problem_type = "single_label_classification"
+    if quantization_config is not None:
+        model = prepare_model_for_kbit_training(model)
+    target_modules = training.get("target_modules", "auto")
+    if target_modules == "auto":
+        target_modules = COMMON_LORA_TARGET_MODULES
+    lora_config = LoraConfig(
+        r=int(training["lora_r"]),
+        lora_alpha=int(training["lora_alpha"]),
+        lora_dropout=float(training["lora_dropout"]),
+        bias="none",
+        task_type="SEQ_CLS",
+        target_modules=target_modules,
+    )
+    model = get_peft_model(model, lora_config)
+    model.adele_training_backend = "transformers_peft_sequence_classification"
+    return model, tokenizer
+
+
 def load_model_for_inference(config: dict[str, Any]) -> tuple[Any, Any]:
+    if config.get("training", {}).get("objective") == "sequence_classification":
+        return load_sequence_classification_model_for_inference(config)
+
     import torch
     from transformers import AutoModelForCausalLM, BitsAndBytesConfig
 
@@ -169,6 +225,40 @@ def load_model_for_inference(config: dict[str, Any]) -> tuple[Any, Any]:
         device_map="auto",
         **model_from_pretrained_kwargs(config),
     )
+    adapter_path = resolve_adapter_path(config)
+    if adapter_path:
+        from peft import PeftModel
+
+        model = PeftModel.from_pretrained(model, str(adapter_path))
+    model.eval()
+    return model, tokenizer
+
+
+def load_sequence_classification_model_for_inference(config: dict[str, Any]) -> tuple[Any, Any]:
+    import torch
+    from transformers import AutoModelForSequenceClassification, BitsAndBytesConfig
+
+    tokenizer = load_tokenizer(config)
+    dtype = torch_dtype_from_name(config.get("training", {}).get("dtype")) or torch.bfloat16
+    quantization_config = None
+    if bool(config.get("inference", {}).get("load_in_4bit", False)):
+        quantization_config = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_compute_dtype=dtype,
+            bnb_4bit_use_double_quant=True,
+        )
+    model = AutoModelForSequenceClassification.from_pretrained(
+        config["model"]["model_name_or_path"],
+        num_labels=5,
+        id2label=SCORE_ID2LABEL,
+        label2id=SCORE_LABEL2ID,
+        torch_dtype=dtype,
+        quantization_config=quantization_config,
+        device_map="auto",
+        **model_from_pretrained_kwargs(config),
+    )
+    model.config.pad_token_id = tokenizer.pad_token_id
     adapter_path = resolve_adapter_path(config)
     if adapter_path:
         from peft import PeftModel

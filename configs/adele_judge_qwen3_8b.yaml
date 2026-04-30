@@ -82,7 +82,15 @@ training:
   max_seq_length: 3072
   load_in_4bit: true
   dtype: bfloat16
+  # Regime switch. Use restricted_score_ce for the CausalLM restricted scorer or
+  # sequence_classification for AutoModelForSequenceClassification.
   objective: restricted_score_ce
+  loss:
+    # Used by sequence_classification. ce_5way_plus_binary adds an auxiliary
+    # binary loss over scores {1, 2} vs {3, 4, 5}.
+    type: ce_5way
+    lambda_binary: 0.5
+    class_weights: null
   class_weighting: null
   score_class_weights: null
   lora_r: 32
@@ -101,11 +109,13 @@ training:
   optim: adamw_8bit
   packing: false
   cache_tokenized_datasets: true
-  # Monitor on a subset during training; run full restricted-continuation eval after training.
+  # Monitor on a subset during training; run full eval after training.
   eval_subset_size: 8192
   eval_subset_strategy: stratified
   eval_subset_stratify_columns: [model_id, target_score]
-  train_sampling_strategy: group_by_length
+  # Random batching is the canonical default. Use group_by_length only as an
+  # explicit length-bucketing experiment.
+  train_sampling_strategy: random
   length_column_name: length
   logging_steps: 50
   eval_steps: 1000
@@ -116,6 +126,9 @@ training:
 inference:
   allowed_scores: ["1", "2", "3", "4", "5"]
   binary_threshold: 3
+  # Normalization keeps this compatible with training.objective:
+  # restricted_continuation_logprobs_fast for causal regimes,
+  # sequence_classification_logits for sequence_classification.
   method: restricted_continuation_logprobs_fast
   generation_fallback: false
   batch_size: 64

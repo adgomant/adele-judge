@@ -58,21 +58,36 @@ def normalize_config(config: dict[str, Any]) -> dict[str, Any]:
     training = config.setdefault("training", {})
     if "train_sampling_strategy" not in training and training.get("group_by_length") is True:
         training["train_sampling_strategy"] = "group_by_length"
+    training.setdefault("train_sampling_strategy", "random")
     if "warmup_steps" not in training and "warmup_ratio" not in training:
         training["warmup_steps"] = 0
     training.setdefault("objective", "causal_lm")
     training.setdefault("class_weighting", None)
     training.setdefault("score_class_weights", None)
+    loss = training.get("loss")
+    if loss is None:
+        loss = {}
+        training["loss"] = loss
+    if isinstance(loss, dict):
+        loss.setdefault("type", "ce_5way")
+        loss.setdefault("lambda_binary", 0.5)
+        loss.setdefault("class_weights", None)
     training.setdefault("cache_tokenized_datasets", True)
     training.setdefault("eval_subset_size", None)
     training.setdefault("eval_subset_seed", training.get("seed", config.get("project", {}).get("seed", 42)))
     training.setdefault("eval_subset_strategy", "stratified")
     training.setdefault("eval_subset_stratify_columns", ["model_id", "target_score"])
+    training.setdefault("max_grad_norm", 1.0)
 
     inference = config.setdefault("inference", {})
     inference.setdefault("allowed_scores", ["1", "2", "3", "4", "5"])
     inference.setdefault("binary_threshold", 3)
-    inference.setdefault("method", "restricted_continuation_logprobs_fast")
+    if training.get("objective") == "sequence_classification":
+        inference["method"] = "sequence_classification_logits"
+    elif inference.get("method") == "sequence_classification_logits":
+        inference["method"] = "restricted_continuation_logprobs_fast"
+    else:
+        inference.setdefault("method", "restricted_continuation_logprobs_fast")
     inference.setdefault("batch_size", 1)
     inference.setdefault("require_adapter", False)
     inference.setdefault("allow_base_model", True)
@@ -118,10 +133,35 @@ def validate_config(config: dict[str, Any]) -> None:
         raise ValueError("model.thinking_mode.apply_if_supported must be true or false")
 
     objective = config["training"].get("objective", "causal_lm")
-    if objective not in {"causal_lm", "restricted_score_ce"}:
-        raise ValueError("training.objective must be 'causal_lm' or 'restricted_score_ce'")
-    if objective == "restricted_score_ce" and bool(config["training"].get("packing", False)):
-        raise ValueError("training.packing must be false when using restricted_score_ce")
+    if objective not in {"causal_lm", "restricted_score_ce", "sequence_classification"}:
+        raise ValueError(
+            "training.objective must be 'causal_lm', 'restricted_score_ce', "
+            "or 'sequence_classification'"
+        )
+    if objective in {"restricted_score_ce", "sequence_classification"} and bool(
+        config["training"].get("packing", False)
+    ):
+        raise ValueError(
+            "training.packing must be false when using restricted_score_ce "
+            "or sequence_classification"
+        )
+    loss = config["training"].get("loss", {})
+    if not isinstance(loss, dict):
+        raise ValueError("training.loss must be a mapping")
+    loss_type = loss.get("type", "ce_5way")
+    if loss_type not in {"ce_5way", "ce_5way_plus_binary"}:
+        raise ValueError("training.loss.type must be 'ce_5way' or 'ce_5way_plus_binary'")
+    lambda_binary = float(loss.get("lambda_binary", 0.5))
+    if lambda_binary < 0.0:
+        raise ValueError("training.loss.lambda_binary must be non-negative")
+    loss_weights = loss.get("class_weights")
+    if isinstance(loss_weights, list) and len(loss_weights) != 5:
+        raise ValueError("training.loss.class_weights must contain five weights")
+    if isinstance(loss_weights, str) and loss_weights not in {"balanced", "inverse_frequency"}:
+        raise ValueError(
+            "training.loss.class_weights must be null, a five-weight list, "
+            "'balanced', or 'inverse_frequency'"
+        )
     class_weighting = config["training"].get("class_weighting")
     if class_weighting not in {None, "inverse_frequency"}:
         raise ValueError("training.class_weighting must be null or 'inverse_frequency'")
@@ -134,11 +174,17 @@ def validate_config(config: dict[str, Any]) -> None:
     stratify_columns = config["training"].get("eval_subset_stratify_columns")
     if not isinstance(stratify_columns, list) or not stratify_columns:
         raise ValueError("training.eval_subset_stratify_columns must be a non-empty list")
+    train_sampling_strategy = config["training"].get("train_sampling_strategy")
+    if train_sampling_strategy not in {"random", "sequential", "group_by_length"}:
+        raise ValueError(
+            "training.train_sampling_strategy must be 'random', 'sequential', or 'group_by_length'"
+        )
 
     method = config["inference"].get("method", "restricted_continuation_logprobs_fast")
     supported_methods = {
         "restricted_continuation_logprobs",
         "restricted_continuation_logprobs_fast",
+        "sequence_classification_logits",
     }
     if method not in supported_methods:
         raise ValueError(f"inference.method must be one of {sorted(supported_methods)}")

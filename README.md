@@ -17,6 +17,7 @@ The project is designed for out-of-model generalization: train on responses from
 - Fixed model-based splits and leave-one-model-out workflows
 - Chat-style supervised fine-tuning with loss only on the score digit
 - Optional restricted 5-way score cross-entropy aligned with continuation scoring
+- Optional discriminative 5-way sequence-classification training
 - QLoRA training support through Unsloth/TRL/Transformers/PEFT-compatible tooling
 - Batched restricted continuation log-probability inference over `"1"` through `"5"`
 - Ordinal, binary, grouped, and baseline metrics
@@ -278,15 +279,34 @@ system + user prompt -> assistant score digit
 
 Prompt tokens, padding, and EOS tokens are labeled `-100`. The target is exactly one score string from `"1"` to `"5"` and no explanation, JSON, or rationale.
 
+A discriminative alternative is selected in the same canonical config:
+
+```yaml
+training:
+  objective: sequence_classification
+  loss:
+    type: ce_5way
+    lambda_binary: 0.5
+    class_weights: null
+  train_sampling_strategy: random
+  packing: false
+```
+
+This path loads `AutoModelForSequenceClassification` with five labels, maps scores `1..5` to labels `0..4`, and trains a classification head on the same chat-formatted prompt before the assistant score. The optional `ce_5way_plus_binary` loss adds a stable binary loss over score groups `{1, 2}` and `{3, 4, 5}` without changing the downstream threshold rule.
+
+`training.objective` is the regime switch. Config normalization keeps `inference.method` compatible with that objective, so `sequence_classification` uses classifier logits and the causal regimes use restricted continuation scoring.
+
 Packing is configurable:
 
 ```yaml
 training:
   max_seq_length: 4096
   packing: false
-  train_sampling_strategy: group_by_length
+  train_sampling_strategy: random
   length_column_name: length
 ```
+
+`train_sampling_strategy: random` is the canonical default for both training regimes. Length bucketing remains available by setting `train_sampling_strategy: group_by_length`, but it is an explicit experiment rather than the default.
 
 Use `scripts/debug_tokenization.py` before long runs to verify label masking on real examples.
 

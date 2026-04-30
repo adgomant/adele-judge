@@ -126,6 +126,7 @@ def preparation_fingerprint(
         "filters": config["data"]["filters"],
         "split": config["split"],
         "prompt": config["prompt"],
+        "training_objective": config["training"].get("objective", "causal_lm"),
         "training_max_seq_length": config["training"]["max_seq_length"],
         "inference_allowed_scores": config["inference"].get("allowed_scores"),
         "binary_threshold": config["inference"].get("binary_threshold"),

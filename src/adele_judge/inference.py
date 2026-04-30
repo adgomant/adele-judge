@@ -68,7 +68,11 @@ def _normalize_logprobs(
     }
 
 
-def _empty_prediction_frame(allowed_scores: list[str]) -> pd.DataFrame:
+def _empty_prediction_frame(
+    allowed_scores: list[str],
+    *,
+    score_logit_prefix: str = "logprob",
+) -> pd.DataFrame:
     columns = [
         "pred_score",
         "pred_binary",
@@ -87,7 +91,7 @@ def _empty_prediction_frame(allowed_scores: list[str]) -> pd.DataFrame:
         "candidate_token_ids",
     ]
     for score in allowed_scores:
-        columns.extend([f"logprob_{score}", f"prob_{score}"])
+        columns.extend([f"{score_logit_prefix}_{score}", f"prob_{score}"])
     return pd.DataFrame(columns=columns)
 
 
@@ -193,6 +197,76 @@ def _score_single_token_batch(
     return outputs
 
 
+def _normalize_classification_logits(
+    allowed_scores: list[str],
+    logits: np.ndarray,
+    *,
+    prompt_token_length: int | None = None,
+) -> dict[str, Any]:
+    values = logits.astype(np.float64)
+    shifted = values - np.max(values)
+    exp_values = np.exp(shifted)
+    probs_arr = exp_values / exp_values.sum()
+    probs = {score: float(prob) for score, prob in zip(allowed_scores, probs_arr, strict=True)}
+    score_logits = {
+        score: float(value)
+        for score, value in zip(allowed_scores, values, strict=True)
+    }
+    pred_index = int(np.argmax(values))
+    sorted_values = np.sort(values)
+    score_margin = float(sorted_values[-1] - sorted_values[-2]) if len(sorted_values) > 1 else 0.0
+    entropy = float(-np.sum(probs_arr * np.log(np.clip(probs_arr, 1e-12, 1.0))))
+    return {
+        "pred_score": int(allowed_scores[pred_index]),
+        "logits": score_logits,
+        "probs": probs,
+        "score_margin": score_margin,
+        "score_entropy": entropy,
+        "prompt_token_length_inference": prompt_token_length,
+        "scoring_method": "sequence_classification_logits",
+        "candidate_token_ids": {},
+    }
+
+
+def score_sequence_classification_batch(
+    model: Any,
+    tokenizer: Any,
+    prompts: list[str],
+    allowed_scores: list[str],
+) -> list[dict[str, Any]]:
+    import torch
+
+    if not prompts:
+        return []
+    device = _model_input_device(model)
+    encoded = tokenizer(
+        prompts,
+        add_special_tokens=False,
+        truncation=False,
+        padding=True,
+        return_tensors="pt",
+    )
+    input_ids = encoded["input_ids"].to(device)
+    attention_mask = encoded["attention_mask"].to(device)
+    prompt_lengths = attention_mask.sum(dim=1).detach().cpu().numpy()
+    with torch.no_grad():
+        logits = model(input_ids=input_ids, attention_mask=attention_mask).logits
+    logits_np = logits.detach().float().cpu().numpy()
+    if logits_np.shape[-1] != len(allowed_scores):
+        raise ValueError(
+            f"Sequence classifier returned {logits_np.shape[-1]} labels; "
+            f"expected {len(allowed_scores)}"
+        )
+    return [
+        _normalize_classification_logits(
+            allowed_scores,
+            row_logits,
+            prompt_token_length=int(prompt_lengths[row_index]),
+        )
+        for row_index, row_logits in enumerate(logits_np)
+    ]
+
+
 def predict_dataframe(
     df: pd.DataFrame,
     model: Any,
@@ -205,10 +279,14 @@ def predict_dataframe(
     method = config["inference"].get("method", "restricted_continuation_logprobs_fast")
     prefer_fast = method == "restricted_continuation_logprobs_fast"
     batch_size = int(config["inference"].get("batch_size", 1))
+    objective = config.get("training", {}).get("objective", "causal_lm")
     configure_tokenizer_thinking_mode(tokenizer, config)
     validate_score_tokenization(tokenizer, allowed_scores)
     if df.empty:
-        return _empty_prediction_frame(allowed_scores)
+        return _empty_prediction_frame(
+            allowed_scores,
+            score_logit_prefix="logit" if objective == "sequence_classification" else "logprob",
+        )
     rows = []
     starts = range(0, len(df), batch_size)
     for start in track(
@@ -219,13 +297,21 @@ def predict_dataframe(
         batch_df = df.iloc[start : start + batch_size]
         examples = [row.to_dict() for _, row in batch_df.iterrows()]
         prompts = [format_prompt(example, tokenizer, system_prompt) for example in examples]
-        scored_rows = score_allowed_continuations_batch(
-            model,
-            tokenizer,
-            prompts,
-            allowed_scores,
-            prefer_fast_single_token=prefer_fast,
-        )
+        if objective == "sequence_classification":
+            scored_rows = score_sequence_classification_batch(
+                model,
+                tokenizer,
+                prompts,
+                allowed_scores,
+            )
+        else:
+            scored_rows = score_allowed_continuations_batch(
+                model,
+                tokenizer,
+                prompts,
+                allowed_scores,
+                prefer_fast_single_token=prefer_fast,
+            )
         for example, scored in zip(examples, scored_rows, strict=True):
             pred_score = scored["pred_score"]
             out = {
@@ -246,7 +332,10 @@ def predict_dataframe(
                 "candidate_token_ids": json.dumps(scored["candidate_token_ids"], sort_keys=True),
             }
             for score in allowed_scores:
-                out[f"logprob_{score}"] = scored["logprobs"][score]
+                if objective == "sequence_classification":
+                    out[f"logit_{score}"] = scored["logits"][score]
+                else:
+                    out[f"logprob_{score}"] = scored["logprobs"][score]
                 out[f"prob_{score}"] = scored["probs"][score]
             rows.append(out)
     return pd.DataFrame(rows)

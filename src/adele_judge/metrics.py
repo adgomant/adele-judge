@@ -97,6 +97,14 @@ def all_metrics(df: pd.DataFrame, threshold: int = 3) -> dict[str, Any]:
     out.update(binary_metrics(df, threshold))
     out.update(calibration_metrics(df))
     out["num_examples"] = int(len(df))
+    for column, metric_name in [
+        ("pred_score", "pred_score_counts"),
+        ("target_score", "target_score_counts"),
+        ("pred_binary", "pred_binary_counts"),
+    ]:
+        if column in df.columns:
+            counts = df[column].value_counts(dropna=False).sort_index()
+            out[metric_name] = {str(key): int(value) for key, value in counts.items()}
     if "target_binary" in df.columns:
         counts = df["target_binary"].value_counts()
         for label in BINARY_LABELS:

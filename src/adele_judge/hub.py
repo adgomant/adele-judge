@@ -156,6 +156,11 @@ def push_trained_judge_to_hub(
 
 
 def stage_hub_repository(config: dict[str, Any], options: HubOptions) -> Path:
+    if config.get("training", {}).get("objective") == "sequence_classification":
+        raise NotImplementedError(
+            "Hugging Face Hub packaging for sequence_classification judges is not supported yet. "
+            "The current Hub packager is specific to AutoModelForCausalLM restricted scoring."
+        )
     paths = resolve_checkpoint_paths(options)
     reset_staging_dir(options.staging_dir)
     (options.staging_dir / STAGING_MARKER).write_text("ADeLe Hub staging directory\n", encoding="utf-8")
@@ -267,7 +272,11 @@ def hub_inference_config(config: dict[str, Any]) -> dict[str, Any]:
                 for score in config.get("inference", {}).get("allowed_scores", ["1", "2", "3", "4", "5"])
             ],
             "binary_threshold": int(config.get("inference", {}).get("binary_threshold", 3)),
-            "method": "restricted_continuation_logprobs_fast",
+            "method": (
+                "sequence_classification_logits"
+                if config.get("training", {}).get("objective") == "sequence_classification"
+                else "restricted_continuation_logprobs_fast"
+            ),
         },
         "training": {
             "max_seq_length": config.get("training", {}).get("max_seq_length"),
@@ -306,6 +315,7 @@ def collect_hub_metadata(
     return {
         "repo_id": options.repo_id,
         "base_model": config["model"]["model_name_or_path"],
+        "training_objective": config.get("training", {}).get("objective"),
         "adapter_path": str(run_dir / "adapter"),
         "run_dir": str(run_dir),
         "git_commit": git_commit(),

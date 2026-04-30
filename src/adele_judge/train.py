@@ -14,7 +14,11 @@ from .formatting import tokenizer_thinking_template_kwargs
 from .metrics import all_metrics, binary_from_score
 from .modeling import load_model_for_training
 from .pipeline import load_or_prepare_splits
-from .tokenization import tokenize_supervised_example, validate_score_tokenization
+from .tokenization import (
+    tokenize_classification_example,
+    tokenize_supervised_example,
+    validate_score_tokenization,
+)
 from .utils import (
     ensure_dir,
     git_commit,
@@ -61,10 +65,35 @@ class CausalDataCollator:
         return batch
 
 
+@dataclass
+class SequenceClassificationDataCollator:
+    tokenizer: Any
+
+    def __call__(self, features: list[dict[str, Any]]) -> dict[str, Any]:
+        import torch
+
+        max_len = max(len(feature["input_ids"]) for feature in features)
+        pad_id = self.tokenizer.pad_token_id
+        input_ids = []
+        attention_mask = []
+        labels = []
+        for feature in features:
+            pad = max_len - len(feature["input_ids"])
+            input_ids.append(feature["input_ids"] + [pad_id] * pad)
+            attention_mask.append(feature["attention_mask"] + [0] * pad)
+            labels.append(int(feature["labels"]))
+        return {
+            "input_ids": torch.tensor(input_ids, dtype=torch.long),
+            "attention_mask": torch.tensor(attention_mask, dtype=torch.long),
+            "labels": torch.tensor(labels, dtype=torch.long),
+        }
+
+
 def tokenize_training_dataframe(df: Any, tokenizer: Any, config: dict[str, Any]) -> list[dict[str, Any]]:
     system_prompt = config["prompt"]["system_prompt"]
     max_seq_length = int(config["training"]["max_seq_length"])
     overflow = config["data"]["filters"].get("on_sequence_overflow", "skip")
+    objective = config["training"].get("objective", "causal_lm")
     rows = []
     skipped = 0
     for _, row in track(
@@ -72,13 +101,23 @@ def tokenize_training_dataframe(df: Any, tokenizer: Any, config: dict[str, Any])
         total=len(df),
         description="Tokenizing training rows",
     ):
-        tokenized = tokenize_supervised_example(
-            row.to_dict(),
-            tokenizer,
-            system_prompt,
-            max_seq_length,
-            overflow,
-        )
+        example = row.to_dict()
+        if objective == "sequence_classification":
+            tokenized = tokenize_classification_example(
+                example,
+                tokenizer,
+                system_prompt,
+                max_seq_length,
+                overflow,
+            )
+        else:
+            tokenized = tokenize_supervised_example(
+                example,
+                tokenizer,
+                system_prompt,
+                max_seq_length,
+                overflow,
+            )
         if tokenized is None:
             skipped += 1
             continue
@@ -167,6 +206,73 @@ def make_restricted_score_trainer(
     return _RestrictedScoreTrainer
 
 
+def make_sequence_classification_trainer(
+    base_trainer_class: Any,
+    loss_config: dict[str, Any],
+    class_weights: list[float] | None = None,
+) -> Any:
+    import torch
+    import torch.nn.functional as F
+
+    loss_type = loss_config.get("type", "ce_5way")
+    lambda_binary = float(loss_config.get("lambda_binary", 0.5))
+
+    class _SequenceClassificationTrainer(base_trainer_class):
+        _last_component_log_step = -1
+
+        def compute_loss(
+            self,
+            model: Any,
+            inputs: dict[str, Any],
+            return_outputs: bool = False,
+            **_: Any,
+        ) -> Any:
+            labels = inputs.pop("labels")
+            outputs = model(**inputs)
+            logits = outputs.logits
+            labels = labels.to(logits.device)
+            weight = None
+            if class_weights is not None:
+                weight = torch.tensor(class_weights, dtype=logits.dtype, device=logits.device)
+            loss_5way = F.cross_entropy(logits, labels, weight=weight)
+            loss = loss_5way
+            loss_binary = None
+            if loss_type == "ce_5way_plus_binary":
+                logit_incorrect = torch.logsumexp(logits[:, :2], dim=-1)
+                logit_correct = torch.logsumexp(logits[:, 2:], dim=-1)
+                binary_logits = torch.stack([logit_incorrect, logit_correct], dim=-1)
+                binary_labels = (labels >= 2).to(dtype=torch.long)
+                loss_binary = F.cross_entropy(binary_logits, binary_labels)
+                loss = loss_5way + lambda_binary * loss_binary
+
+            self._maybe_log_loss_components(model, loss, loss_5way, loss_binary)
+            return (loss, outputs) if return_outputs else loss
+
+        def _maybe_log_loss_components(
+            self,
+            model: Any,
+            loss: Any,
+            loss_5way: Any,
+            loss_binary: Any | None,
+        ) -> None:
+            if not getattr(model, "training", False):
+                return
+            step = int(getattr(self.state, "global_step", 0))
+            logging_steps = max(1, int(getattr(self.args, "logging_steps", 1)))
+            if step == self._last_component_log_step or step % logging_steps != 0:
+                return
+            payload = {
+                "loss_5way": float(loss_5way.detach().cpu()),
+                "loss_total": float(loss.detach().cpu()),
+            }
+            if loss_binary is not None:
+                payload["loss_binary"] = float(loss_binary.detach().cpu())
+            self.log(payload)
+            self._last_component_log_step = step
+
+    return _SequenceClassificationTrainer
+
+
 def make_score_logits_preprocessor(score_token_ids: list[int]) -> Any:
     def preprocess_logits_for_metrics(logits: Any, labels: Any) -> Any:
         import torch
@@ -202,7 +308,6 @@ def make_score_compute_metrics(score_token_ids: list[int], threshold: int = 3) -
         label_ids = np.asarray(labels)
         if len(score_logits) == 0:
             return {}
-        pred_scores = np.argmax(score_logits, axis=-1).astype(int) + 1
 
         if label_ids.ndim == 2:
             supervised = label_ids != -100
@@ -221,29 +326,63 @@ def make_score_compute_metrics(score_token_ids: list[int], threshold: int = 3) -
         if not np.any(valid):
             return {}
 
-        score_logits = score_logits[valid]
-        pred_scores = pred_scores[valid].astype(int)
-        target_scores = target_scores[valid].astype(int)
-        probs = _softmax_np(score_logits)
-        sorted_logits = np.sort(score_logits, axis=1)
-        score_margin = sorted_logits[:, -1] - sorted_logits[:, -2]
-        score_entropy = -np.sum(probs * np.log(np.clip(probs, 1e-12, 1.0)), axis=1)
-
-        metrics_df = pd.DataFrame(
-            {
-                "target_score": target_scores,
-                "pred_score": pred_scores,
-                "target_binary": [binary_from_score(score, threshold) for score in target_scores],
-                "pred_binary": [binary_from_score(score, threshold) for score in pred_scores],
-                "score_margin": score_margin,
-                "score_entropy": score_entropy,
-            }
+        return metrics_from_score_logits(
+            score_logits[valid],
+            target_scores[valid].astype(int),
+            threshold,
         )
-        for index, score in enumerate(range(1, 6)):
-            metrics_df[f"prob_{score}"] = probs[:, index]
-        return all_metrics(metrics_df, threshold)
 
     return compute_metrics
+
+
+def make_classification_compute_metrics(threshold: int = 3) -> Any:
+    def compute_metrics(eval_prediction: Any) -> dict[str, Any]:
+        predictions = eval_prediction.predictions
+        labels = eval_prediction.label_ids
+        if isinstance(predictions, tuple):
+            predictions = predictions[0]
+        if isinstance(labels, tuple):
+            labels = labels[0]
+        score_logits = np.asarray(predictions)
+        label_ids = np.asarray(labels)
+        if len(score_logits) == 0:
+            return {}
+        valid = (label_ids >= 0) & (label_ids < 5)
+        if not np.any(valid):
+            return {}
+        return metrics_from_score_logits(
+            score_logits[valid],
+            label_ids[valid].astype(int) + 1,
+            threshold,
+        )
+
+    return compute_metrics
+
+
+def metrics_from_score_logits(
+    score_logits: np.ndarray,
+    target_scores: np.ndarray,
+    threshold: int,
+) -> dict[str, Any]:
+    pred_scores = np.argmax(score_logits, axis=-1).astype(int) + 1
+    probs = _softmax_np(score_logits)
+    sorted_logits = np.sort(score_logits, axis=1)
+    score_margin = sorted_logits[:, -1] - sorted_logits[:, -2]
+    score_entropy = -np.sum(probs * np.log(np.clip(probs, 1e-12, 1.0)), axis=1)
+
+    metrics_df = pd.DataFrame(
+        {
+            "target_score": target_scores.astype(int),
+            "pred_score": pred_scores.astype(int),
+            "target_binary": [binary_from_score(score, threshold) for score in target_scores],
+            "pred_binary": [binary_from_score(score, threshold) for score in pred_scores],
+            "score_margin": score_margin,
+            "score_entropy": score_entropy,
+        }
+    )
+    for index, score in enumerate(range(1, 6)):
+        metrics_df[f"prob_{score}"] = probs[:, index]
+    return all_metrics(metrics_df, threshold)
 
 
 def _score_from_metric_label(label: Any, token_id_to_score: dict[int, int]) -> float:
@@ -395,11 +534,20 @@ def load_or_tokenize_dataset(
 
 
 def score_class_weights(train_df: Any, config: dict[str, Any]) -> list[float] | None:
+    loss_weights = (config["training"].get("loss") or {}).get("class_weights")
+    if isinstance(loss_weights, list):
+        return [float(weight) for weight in loss_weights]
+    if isinstance(loss_weights, str) and loss_weights in {"balanced", "inverse_frequency"}:
+        return inverse_frequency_score_weights(train_df)
     explicit = config["training"].get("score_class_weights")
     if explicit is not None:
         return [float(weight) for weight in explicit]
     if config["training"].get("class_weighting") != "inverse_frequency":
         return None
+    return inverse_frequency_score_weights(train_df)
+
+
+def inverse_frequency_score_weights(train_df: Any) -> list[float]:
     counts = train_df["target_score"].astype(int).value_counts().to_dict()
     total = sum(int(counts.get(score, 0)) for score in range(1, 6))
     weights = []
@@ -450,7 +598,7 @@ def training_args_kwargs(
         "save_total_limit": int(training["save_total_limit"]),
         "eval_strategy": "steps" if evaluation_enabled else "no",
         "save_strategy": "steps",
-        "train_sampling_strategy": training.get("train_sampling_strategy", "group_by_length"),
+        "train_sampling_strategy": training.get("train_sampling_strategy", "random"),
         "length_column_name": training.get("length_column_name", "length"),
         "remove_unused_columns": False,
         "report_to": [],
@@ -458,6 +606,8 @@ def training_args_kwargs(
         "bf16": str(training.get("dtype", "")).lower() in {"bf16", "bfloat16"},
         "fp16": str(training.get("dtype", "")).lower() in {"fp16", "float16"},
     }
+    if "max_grad_norm" in training:
+        kwargs["max_grad_norm"] = float(training["max_grad_norm"])
     if evaluation_enabled:
         kwargs["eval_steps"] = int(training["eval_steps"])
     if "warmup_steps" in training:
@@ -520,7 +670,11 @@ def train_judge(
         for item in sorted(score_report, key=lambda row: int(row["score"]))
         if item["num_tokens"] == 1
     ]
-    if len(metric_score_token_ids) == 5:
+    if objective == "sequence_classification":
+        compute_metrics = make_classification_compute_metrics(
+            threshold=int(config["inference"].get("binary_threshold", 3)),
+        )
+    elif len(metric_score_token_ids) == 5:
         compute_metrics = make_score_compute_metrics(
             metric_score_token_ids,
             threshold=int(config["inference"].get("binary_threshold", 3)),
@@ -532,16 +686,27 @@ def train_judge(
             for score in range(1, 6)
         ]
         trainer_class = make_restricted_score_trainer(Trainer, score_token_ids, class_weights)
+    elif objective == "sequence_classification":
+        trainer_class = make_sequence_classification_trainer(
+            Trainer,
+            config["training"].get("loss") or {},
+            class_weights,
+        )
+
+    if objective == "sequence_classification":
+        data_collator = SequenceClassificationDataCollator(tokenizer)
+    else:
+        data_collator = CausalDataCollator(
+            tokenizer,
+            include_score_metadata=objective == "restricted_score_ce",
+        )
 
     trainer = trainer_class(
         model=model,
         args=args,
         train_dataset=train_dataset,
         eval_dataset=eval_dataset,
-        data_collator=CausalDataCollator(
-            tokenizer,
-            include_score_metadata=objective == "restricted_score_ce",
-        ),
+        data_collator=data_collator,
         compute_metrics=compute_metrics,
         preprocess_logits_for_metrics=preprocess_logits_for_metrics,
     )
@@ -567,6 +732,7 @@ def train_judge(
             "git_commit": git_commit(),
             "package_versions": package_versions(),
             "training_objective": objective,
+            "training_loss": config["training"].get("loss"),
             "training_backend": getattr(model, "adele_training_backend", None),
             "training_mode": "finalist" if finalist else "standard",
             "score_token_ids": score_token_ids,

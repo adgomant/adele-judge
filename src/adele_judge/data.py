@@ -9,7 +9,11 @@ from rich.progress import track
 
 from .config import column_name
 from .formatting import clean_value
-from .tokenization import batch_response_token_lengths, tokenize_supervised_example
+from .tokenization import (
+    batch_response_token_lengths,
+    tokenize_classification_example,
+    tokenize_supervised_example,
+)
 
 
 REQUIRED_LOGICAL_COLUMNS = [
@@ -146,6 +150,7 @@ def add_sequence_lengths_and_filter(
     max_response_tokens = config["data"]["filters"].get("max_response_tokens")
     overflow_mode = config["data"]["filters"].get("on_sequence_overflow", "skip")
     system_prompt = config["prompt"]["system_prompt"]
+    objective = config["training"].get("objective", "causal_lm")
     prompt_lengths: list[int | float] = []
     target_lengths: list[int | float] = []
     sequence_lengths: list[int | float] = []
@@ -156,13 +161,22 @@ def add_sequence_lengths_and_filter(
         description="Checking sequence lengths",
     ):
         example = row.to_dict()
-        tokenized = tokenize_supervised_example(
-            example,
-            tokenizer,
-            system_prompt,
-            max_seq_length,
-            overflow_mode,
-        )
+        if objective == "sequence_classification":
+            tokenized = tokenize_classification_example(
+                example,
+                tokenizer,
+                system_prompt,
+                max_seq_length,
+                overflow_mode,
+            )
+        else:
+            tokenized = tokenize_supervised_example(
+                example,
+                tokenizer,
+                system_prompt,
+                max_seq_length,
+                overflow_mode,
+            )
         if tokenized is None:
             prompt_lengths.append(np.nan)
             target_lengths.append(np.nan)
@@ -170,7 +184,7 @@ def add_sequence_lengths_and_filter(
             keep.append(False)
         else:
             prompt_lengths.append(tokenized.prompt_length)
-            target_lengths.append(tokenized.target_length)
+            target_lengths.append(getattr(tokenized, "target_length", 0))
             sequence_lengths.append(tokenized.sequence_length)
             keep.append(True)
 
@@ -193,9 +207,7 @@ def add_sequence_lengths_and_filter(
         "sequence_overflow_pct": _safe_pct(len(df) - len(kept), len(df)),
         "examples_after_sequence_filter": len(kept),
         "sequence_overflow_reason": (
-            "Full chat-formatted sequence exceeded max_seq_length after response filtering. "
-            "This includes system prompt, benchmark/task metadata, question, reference answer, "
-            "model response, chat-template tokens, and target score tokens."
+            sequence_overflow_reason(objective)
         ),
         "length_filter_warnings": length_filter_warnings(max_seq_length, max_response_tokens),
     }
@@ -207,6 +219,17 @@ def add_sequence_lengths_and_filter(
         report["kept_sequence_length"] = _series_stats(kept["sequence_length"])
         report["kept_prompt_token_length"] = _series_stats(kept["prompt_token_length"])
     return kept, report
+
+
+def sequence_overflow_reason(objective: str) -> str:
+    base = (
+        "Full chat-formatted sequence exceeded max_seq_length after response filtering. "
+        "This includes system prompt, question, reference answer, model response, "
+        "and chat-template tokens"
+    )
+    if objective == "sequence_classification":
+        return base + "; it excludes the assistant target score."
+    return base + ", plus target score tokens."
 
 
 def length_statistics(df: pd.DataFrame) -> dict[str, Any]:
