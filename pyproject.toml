@@ -40,6 +40,9 @@ train = [
 fa2 = [
   "flash-attn>=2.8",
 ]
+deepspeed = [
+  "deepspeed>=0.14.5",
+]
 dev = [
   "pytest>=8",
   "ruff>=0.6",

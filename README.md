@@ -96,13 +96,19 @@ Training with FlashAttention 2 support:
 uv sync --extra train --extra fa2
 ```
 
+Training with DeepSpeed support:
+
+```bash
+uv sync --extra train --extra deepspeed
+```
+
 The `train` extra includes CUDA training/runtime helpers used by Unsloth, TRL, PEFT, and bitsandbytes:
 
 ```text
 accelerate, bitsandbytes, ninja, packaging, peft, psutil, setuptools, torch, trl, unsloth, wheel
 ```
 
-The `fa2` extra installs `flash-attn`. It is intentionally separate because FlashAttention is Linux/CUDA/PyTorch-build sensitive and can make CPU, macOS, or mismatched CUDA environments brittle.
+The `fa2` extra installs `flash-attn`. The `deepspeed` extra installs DeepSpeed. Both are intentionally separate because they are Linux/CUDA/PyTorch-build sensitive and can make CPU, macOS, or mismatched CUDA environments brittle.
 
 If FlashAttention needs to be installed manually in an already-created environment, use:
 
@@ -131,6 +137,7 @@ python -m pip install -e .
 python -m pip install -e ".[dev]"
 python -m pip install -e ".[train]"
 python -m pip install -e ".[train,fa2]"
+python -m pip install -e ".[train,deepspeed]"
 ```
 
 ## Dependency Extras
@@ -140,6 +147,7 @@ The extras are:
 - `dev`: test and lint tools.
 - `train`: CUDA training stack without FlashAttention.
 - `fa2`: FlashAttention 2, opt-in for compatible Linux/CUDA environments.
+- `deepspeed`: DeepSpeed, opt-in for compatible Linux/CUDA environments.
 
 `flash-attn` has undeclared build requirements in some environments, so [pyproject.toml](pyproject.toml) includes `tool.uv.extra-build-dependencies` for uv builds.
 
@@ -315,6 +323,83 @@ Training writes `inference_config.yaml` with `model.adapter_path` pointing at th
 The default training config uses a validation monitor subset during training, stratified by `model_id` and `target_score`. Run full validation/test prediction and evaluation after training with the generated `inference_config.yaml`.
 
 Finalist training is enabled with `--finalist`. It trains on the union of the prepared train, validation, and test splits, disables Trainer evaluation, and skips validation trainer metrics. Use a distinct `project.run_name` or output directory when you want to preserve artifacts from earlier validation runs.
+
+## Distributed Training
+
+Distributed training is config-driven through the top-level `distributed` section. The implementation uses the existing `transformers.Trainer` path, so dataloader sharding, metric gathering, and checkpoint coordination are handled by Trainer/Accelerate.
+
+Single-GPU behavior is unchanged. When `distributed.enabled=true`, the training loader bypasses Unsloth and uses standard Transformers+PEFT. Training does not use `device_map="auto"` in distributed mode; each process owns its launcher-assigned local GPU.
+
+DDP with QLoRA is the recommended multi-GPU path:
+
+```bash
+uv run torchrun --nproc_per_node=8 -m adele_judge train \
+  --config configs/adele_judge_qwen3_8b.yaml \
+  --override distributed.enabled=true \
+  --override distributed.strategy=ddp
+```
+
+The same run can be launched with Accelerate:
+
+```bash
+uv run accelerate launch --multi_gpu --num_processes 8 -m adele_judge train \
+  --config configs/adele_judge_qwen3_8b.yaml \
+  --override distributed.enabled=true \
+  --override distributed.strategy=ddp
+```
+
+For FSDP, disable 4-bit loading and configure the transformer layer class. For the default Qwen3 model, use `Qwen3DecoderLayer`:
+
+```bash
+uv run accelerate launch --multi_gpu --num_processes 8 -m adele_judge train \
+  --config configs/adele_judge_qwen3_8b.yaml \
+  --override distributed.enabled=true \
+  --override distributed.strategy=fsdp \
+  --override training.load_in_4bit=false \
+  --override distributed.fsdp.transformer_layer_cls_to_wrap=Qwen3DecoderLayer
+```
+
+DeepSpeed is configured inline in the YAML under `distributed.deepspeed`, so no separate JSON file is required. Install the extra, disable 4-bit loading, and select the strategy:
+
+```bash
+uv run accelerate launch --multi_gpu --num_processes 8 -m adele_judge train \
+  --config configs/adele_judge_qwen3_8b.yaml \
+  --override distributed.enabled=true \
+  --override distributed.strategy=deepspeed \
+  --override training.load_in_4bit=false \
+  --override distributed.deepspeed.zero_stage=2
+```
+
+Minimal SLURM template:
+
+```bash
+#!/bin/bash
+#SBATCH --gres=gpu:8
+#SBATCH --cpus-per-task=16
+#SBATCH --mem=256G
+#SBATCH --time=24:00:00
+
+uv run accelerate launch --multi_gpu --num_processes 8 -m adele_judge train \
+  --config configs/adele_judge_qwen3_8b.yaml \
+  --override distributed.enabled=true \
+  --override distributed.strategy=ddp
+```
+
+Limitations:
+
+- Unsloth is kept for single-GPU causal training only.
+- QLoRA/4-bit training is supported for DDP, not FSDP or DeepSpeed.
+- DeepSpeed is optional and requires installing the `deepspeed` extra; its Trainer config is generated from `distributed.deepspeed` in the run YAML.
+- Hub merge and upload remain a separate single-process `push-to-hub` step.
+
+Training logs `per_device_train_batch_size`, `gradient_accumulation_steps`, `world_size`, and `effective_global_batch_size`. Resume Trainer checkpoints with:
+
+```bash
+uv run torchrun --nproc_per_node=8 -m adele_judge train \
+  --config configs/adele_judge_qwen3_8b.yaml \
+  --override distributed.enabled=true \
+  --override training.resume_from_checkpoint=runs/qwen3_8b_adele_judge/checkpoints/checkpoint-3000
+```
 
 ## Inference
 

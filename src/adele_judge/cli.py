@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from copy import deepcopy
 from enum import Enum
 from pathlib import Path
@@ -92,6 +93,16 @@ def _print_metrics(metrics: dict[str, Any], title: str) -> None:
     console.print(table)
 
 
+def _env_world_process_zero() -> bool:
+    rank = os.environ.get("RANK")
+    if rank is not None:
+        return int(rank) == 0
+    local_rank = os.environ.get("LOCAL_RANK")
+    if local_rank is not None:
+        return int(local_rank) == 0
+    return True
+
+
 @app.command()
 def prepare(
     config: ConfigOption,
@@ -126,6 +137,9 @@ def train(
     """Train the judge adapter."""
     run_config = load_config(config, override or [])
     log_path = project_output_dir(run_config) / "training.log"
+    if not _env_world_process_zero():
+        train_judge(run_config, force_prepare=force_prepare, finalist=finalist)
+        return
     with tee_output(log_path):
         run_name = run_config.get("project", {}).get("run_name", "unknown")
         console.print(f"[bold]Run:[/] {run_name}")

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import importlib.util
 import json
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -255,6 +257,9 @@ def make_sequence_classification_trainer(
             loss_5way: Any,
             loss_binary: Any | None,
         ) -> None:
+            is_world_process_zero = getattr(self, "is_world_process_zero", None)
+            if callable(is_world_process_zero) and not is_world_process_zero():
+                return
             if not getattr(model, "training", False):
                 return
             step = int(getattr(self.state, "global_step", 0))
@@ -575,6 +580,85 @@ def finalist_training_dataframe(splits: dict[str, Any]) -> Any:
     return pd.concat(chunks, ignore_index=True)
 
 
+def distributed_training_args_kwargs(config: dict[str, Any]) -> dict[str, Any]:
+    distributed = config.get("distributed", {})
+    if not bool(distributed.get("enabled", False)):
+        return {}
+
+    strategy = str(distributed.get("strategy", "ddp"))
+    kwargs: dict[str, Any] = {}
+    if bool(distributed.get("gradient_checkpointing", False)):
+        kwargs["gradient_checkpointing"] = True
+
+    if strategy == "ddp":
+        kwargs["ddp_backend"] = distributed.get("backend", "nccl")
+        kwargs["ddp_find_unused_parameters"] = bool(
+            distributed.get("find_unused_parameters", False)
+        )
+    elif strategy == "fsdp":
+        fsdp = distributed.get("fsdp", {})
+        fsdp_options = [str(fsdp.get("sharding_strategy", "full_shard"))]
+        transformer_layer = fsdp.get("transformer_layer_cls_to_wrap")
+        if transformer_layer:
+            fsdp_options.append("auto_wrap")
+        fsdp_config: dict[str, Any] = {
+            "activation_checkpointing": bool(fsdp.get("activation_checkpointing", True)),
+            "use_orig_params": bool(fsdp.get("use_orig_params", True)),
+        }
+        if transformer_layer:
+            fsdp_config["transformer_layer_cls_to_wrap"] = transformer_layer
+        kwargs["fsdp"] = " ".join(fsdp_options)
+        kwargs["fsdp_config"] = fsdp_config
+    elif strategy == "deepspeed":
+        if importlib.util.find_spec("deepspeed") is None:
+            raise ImportError(
+                "DeepSpeed training was requested, but the deepspeed package is not installed. "
+                "Install with the deepspeed extra or use distributed.strategy='ddp'/'fsdp'."
+            )
+        kwargs["deepspeed"] = deepspeed_config_dict(config)
+    return kwargs
+
+
+def deepspeed_config_dict(config: dict[str, Any]) -> dict[str, Any]:
+    deepspeed = config.get("distributed", {}).get("deepspeed", {})
+    zero_stage = int(deepspeed.get("zero_stage", 2))
+    zero_optimization: dict[str, Any] = {"stage": zero_stage}
+
+    optimizer_device = deepspeed.get("offload_optimizer_device", "none")
+    if optimizer_device != "none":
+        zero_optimization["offload_optimizer"] = {"device": optimizer_device}
+
+    param_device = deepspeed.get("offload_param_device", "none")
+    if param_device != "none":
+        zero_optimization["offload_param"] = {"device": param_device}
+
+    if zero_stage == 3:
+        zero_optimization["stage3_gather_16bit_weights_on_model_save"] = bool(
+            deepspeed.get("stage3_gather_16bit_weights_on_model_save", True)
+        )
+
+    ds_config: dict[str, Any] = {
+        "bf16": {"enabled": "auto"},
+        "fp16": {"enabled": "auto"},
+        "zero_optimization": zero_optimization,
+        "gradient_accumulation_steps": "auto",
+        "train_micro_batch_size_per_gpu": "auto",
+        "train_batch_size": "auto",
+        "gradient_clipping": deepspeed.get("gradient_clipping", "auto"),
+    }
+    return _recursive_merge(ds_config, deepspeed.get("config_overrides", {}))
+
+
+def _recursive_merge(base: dict[str, Any], overrides: dict[str, Any]) -> dict[str, Any]:
+    merged = {key: value.copy() if isinstance(value, dict) else value for key, value in base.items()}
+    for key, value in overrides.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _recursive_merge(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
 def training_args_kwargs(
     config: dict[str, Any],
     output_dir: Path,
@@ -614,7 +698,52 @@ def training_args_kwargs(
         kwargs["warmup_steps"] = int(training["warmup_steps"])
     elif "warmup_ratio" in training:
         kwargs["warmup_ratio"] = float(training["warmup_ratio"])
+    kwargs.update(distributed_training_args_kwargs(config))
     return kwargs
+
+
+def effective_global_batch_size(config: dict[str, Any], world_size: int) -> int:
+    training = config["training"]
+    return (
+        int(training["per_device_train_batch_size"])
+        * int(training["gradient_accumulation_steps"])
+        * int(world_size)
+    )
+
+
+def distributed_runtime_metadata(config: dict[str, Any], args: Any) -> dict[str, Any]:
+    world_size = int(getattr(args, "world_size", 1))
+    distributed = config.get("distributed", {})
+    training = config["training"]
+    return {
+        "enabled": bool(distributed.get("enabled", False)),
+        "strategy": distributed.get("strategy", "ddp"),
+        "backend": distributed.get("backend", "nccl"),
+        "mixed_precision": distributed.get("mixed_precision"),
+        "gradient_checkpointing": bool(distributed.get("gradient_checkpointing", False)),
+        "find_unused_parameters": distributed.get("find_unused_parameters"),
+        "fsdp": distributed.get("fsdp"),
+        "deepspeed": distributed.get("deepspeed"),
+        "world_size": world_size,
+        "launcher": detected_launcher(),
+        "per_device_train_batch_size": int(training["per_device_train_batch_size"]),
+        "gradient_accumulation_steps": int(training["gradient_accumulation_steps"]),
+        "effective_global_batch_size": effective_global_batch_size(config, world_size),
+    }
+
+
+def detected_launcher() -> str:
+    if os.environ.get("ACCELERATE_USE_FSDP") or os.environ.get("ACCELERATE_USE_DEEPSPEED"):
+        return "accelerate"
+    if os.environ.get("ACCELERATE_MIXED_PRECISION"):
+        return "accelerate"
+    if os.environ.get("TORCHELASTIC_RUN_ID"):
+        return "torchrun"
+    if os.environ.get("SLURM_JOB_ID"):
+        return "slurm"
+    if os.environ.get("LOCAL_RANK") is not None:
+        return "distributed"
+    return "single_process"
 
 
 def train_judge(
@@ -626,12 +755,26 @@ def train_judge(
     seed = int(config["training"].get("seed", config["project"].get("seed", 42)))
     set_seed(seed)
     output_dir = ensure_dir(project_output_dir(config))
-    model, tokenizer = load_model_for_training(config)
     from transformers import Trainer, TrainingArguments
 
-    splits = load_or_prepare_splits(config, tokenizer, force_prepare=force_prepare)
-    split_counts = source_split_counts(splits)
     evaluation_enabled = not finalist
+    args = TrainingArguments(
+        **training_args_kwargs(config, output_dir, seed, evaluation_enabled=evaluation_enabled)
+    )
+    model, tokenizer = load_model_for_training(config)
+    batch_metadata = distributed_runtime_metadata(config, args)
+    if args.should_save:
+        print(
+            "Effective global batch size: "
+            f"{batch_metadata['effective_global_batch_size']} "
+            f"({batch_metadata['per_device_train_batch_size']} per device "
+            f"x {batch_metadata['gradient_accumulation_steps']} grad accum "
+            f"x {batch_metadata['world_size']} world size)"
+        )
+
+    with args.main_process_first(local=False, desc="prepare dataset"):
+        splits = load_or_prepare_splits(config, tokenizer, force_prepare=force_prepare)
+    split_counts = source_split_counts(splits)
     training_df = finalist_training_dataframe(splits) if finalist else splits["train"]
     eval_split = None if finalist else select_eval_subset(splits["validation"], config)
     allowed_scores = [
@@ -643,23 +786,28 @@ def train_judge(
         allowed_scores,
         require_single_token=objective == "restricted_score_ce",
     )
-    write_json(output_dir / "score_tokenization_report.json", score_report)
+    if args.should_save:
+        write_json(output_dir / "score_tokenization_report.json", score_report)
 
     train_split_name = "train_finalist" if finalist else "train"
-    train_dataset = load_or_tokenize_dataset(train_split_name, training_df, tokenizer, config, output_dir)
-    eval_dataset = None
-    if evaluation_enabled and eval_split is not None:
-        eval_dataset = load_or_tokenize_dataset(
-            "validation_monitor",
-            eval_split,
+    with args.main_process_first(local=False, desc="tokenize train dataset"):
+        train_dataset = load_or_tokenize_dataset(
+            train_split_name,
+            training_df,
             tokenizer,
             config,
             output_dir,
         )
-
-    args = TrainingArguments(
-        **training_args_kwargs(config, output_dir, seed, evaluation_enabled=evaluation_enabled)
-    )
+    eval_dataset = None
+    if evaluation_enabled and eval_split is not None:
+        with args.main_process_first(local=False, desc="tokenize validation monitor"):
+            eval_dataset = load_or_tokenize_dataset(
+                "validation_monitor",
+                eval_split,
+                tokenizer,
+                config,
+                output_dir,
+            )
     trainer_class = Trainer
     score_token_ids: list[int] | None = None
     class_weights = score_class_weights(training_df, config)
@@ -710,40 +858,46 @@ def train_judge(
         compute_metrics=compute_metrics,
         preprocess_logits_for_metrics=preprocess_logits_for_metrics,
     )
-    result = trainer.train()
+    resume_from_checkpoint = config["training"].get("resume_from_checkpoint")
+    result = trainer.train(resume_from_checkpoint=resume_from_checkpoint or None)
     metrics = result.metrics
     eval_metrics = trainer.evaluate() if evaluation_enabled else {}
 
     adapter_dir = output_dir / "adapter"
     tokenizer_dir = output_dir / "tokenizer"
     trainer.save_model(str(adapter_dir))
-    tokenizer.save_pretrained(str(tokenizer_dir))
-    inference_config = copy_config(config)
-    inference_config["model"]["adapter_path"] = str(adapter_dir)
-    save_config(inference_config, output_dir / "inference_config.yaml")
-    write_json(output_dir / "train_metrics.json", _jsonable(metrics))
-    if evaluation_enabled:
-        write_json(output_dir / "validation_trainer_metrics.json", _jsonable(eval_metrics))
-    write_json(output_dir / "trainer_log_history.json", trainer.state.log_history)
-    write_json(output_dir / "resolved_training_args.json", args.to_dict())
-    write_json(
-        output_dir / "run_metadata.json",
-        {
-            "git_commit": git_commit(),
-            "package_versions": package_versions(),
-            "training_objective": objective,
-            "training_loss": config["training"].get("loss"),
-            "training_backend": getattr(model, "adele_training_backend", None),
-            "training_mode": "finalist" if finalist else "standard",
-            "score_token_ids": score_token_ids,
-            "score_class_weights": class_weights,
-            "source_split_counts": split_counts,
-            "training_examples": int(len(training_df)),
-            "evaluation_enabled": evaluation_enabled,
-            "validation_monitor_examples": int(len(eval_split)) if eval_split is not None else 0,
-            "validation_full_examples": int(len(splits["validation"])),
-        },
-    )
+    trainer.accelerator.wait_for_everyone()
+    if trainer.is_world_process_zero():
+        tokenizer.save_pretrained(str(tokenizer_dir))
+        inference_config = copy_config(config)
+        inference_config["model"]["adapter_path"] = str(adapter_dir)
+        save_config(inference_config, output_dir / "inference_config.yaml")
+        write_json(output_dir / "train_metrics.json", _jsonable(metrics))
+        if evaluation_enabled:
+            write_json(output_dir / "validation_trainer_metrics.json", _jsonable(eval_metrics))
+        write_json(output_dir / "trainer_log_history.json", trainer.state.log_history)
+        write_json(output_dir / "resolved_training_args.json", args.to_dict())
+        write_json(
+            output_dir / "run_metadata.json",
+            {
+                "git_commit": git_commit(),
+                "package_versions": package_versions(),
+                "training_objective": objective,
+                "training_loss": config["training"].get("loss"),
+                "training_backend": getattr(model, "adele_training_backend", None),
+                "training_mode": "finalist" if finalist else "standard",
+                "score_token_ids": score_token_ids,
+                "score_class_weights": class_weights,
+                "source_split_counts": split_counts,
+                "training_examples": int(len(training_df)),
+                "evaluation_enabled": evaluation_enabled,
+                "validation_monitor_examples": int(len(eval_split)) if eval_split is not None else 0,
+                "validation_full_examples": int(len(splits["validation"])),
+                "distributed": batch_metadata,
+                "world_size": batch_metadata["world_size"],
+                "effective_global_batch_size": batch_metadata["effective_global_batch_size"],
+            },
+        )
     return {"train_metrics": metrics, "validation_trainer_metrics": eval_metrics}
 
 

@@ -1,10 +1,13 @@
 README.md
 pyproject.toml
 src/adele_judge/__init__.py
+src/adele_judge/__main__.py
 src/adele_judge/cli.py
 src/adele_judge/config.py
 src/adele_judge/data.py
 src/adele_judge/formatting.py
+src/adele_judge/hub.py
+src/adele_judge/hub_pipeline.py
 src/adele_judge/inference.py
 src/adele_judge/metrics.py
 src/adele_judge/modeling.py

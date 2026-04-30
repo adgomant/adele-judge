@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any
 from warnings import warn
@@ -67,9 +68,36 @@ def model_from_pretrained_kwargs(config: dict[str, Any]) -> dict[str, Any]:
     return kwargs
 
 
+def distributed_training_enabled(config: dict[str, Any]) -> bool:
+    return bool(config.get("distributed", {}).get("enabled", False))
+
+
+def distributed_training_strategy(config: dict[str, Any]) -> str:
+    return str(config.get("distributed", {}).get("strategy", "ddp"))
+
+
+def training_device_map(config: dict[str, Any]) -> str | dict[str, int] | None:
+    """Return safe training placement for Transformers loaders."""
+
+    if not distributed_training_enabled(config):
+        return "auto"
+    if distributed_training_strategy(config) != "ddp":
+        if bool(config["training"].get("load_in_4bit", True)):
+            raise ValueError(
+                "QLoRA/4-bit training is only supported for single-GPU or DDP in this project. "
+                "Set training.load_in_4bit=false for FSDP or DeepSpeed."
+            )
+        return None
+    if bool(config["training"].get("load_in_4bit", True)):
+        return {"": int(os.environ.get("LOCAL_RANK", "0"))}
+    return None
+
+
 def load_model_for_training(config: dict[str, Any]) -> tuple[Any, Any]:
     if config["training"].get("objective") == "sequence_classification":
         return load_sequence_classification_model_for_training(config)
+    if distributed_training_enabled(config):
+        return load_model_for_training_fallback(config)
 
     model_name = config["model"]["model_name_or_path"]
     training = config["training"]
@@ -130,12 +158,15 @@ def load_model_for_training_fallback(config: dict[str, Any]) -> tuple[Any, Any]:
             bnb_4bit_compute_dtype=dtype,
             bnb_4bit_use_double_quant=True,
         )
+    device_map = training_device_map(config)
+    model_kwargs = model_from_pretrained_kwargs(config)
+    if device_map is not None:
+        model_kwargs["device_map"] = device_map
     model = AutoModelForCausalLM.from_pretrained(
         config["model"]["model_name_or_path"],
         torch_dtype=dtype,
         quantization_config=quantization_config,
-        device_map="auto",
-        **model_from_pretrained_kwargs(config),
+        **model_kwargs,
     )
     if quantization_config is not None:
         model = prepare_model_for_kbit_training(model)
@@ -171,6 +202,10 @@ def load_sequence_classification_model_for_training(config: dict[str, Any]) -> t
             bnb_4bit_compute_dtype=dtype,
             bnb_4bit_use_double_quant=True,
         )
+    device_map = training_device_map(config)
+    model_kwargs = model_from_pretrained_kwargs(config)
+    if device_map is not None:
+        model_kwargs["device_map"] = device_map
     model = AutoModelForSequenceClassification.from_pretrained(
         config["model"]["model_name_or_path"],
         num_labels=5,
@@ -178,8 +213,7 @@ def load_sequence_classification_model_for_training(config: dict[str, Any]) -> t
         label2id=SCORE_LABEL2ID,
         torch_dtype=dtype,
         quantization_config=quantization_config,
-        device_map="auto",
-        **model_from_pretrained_kwargs(config),
+        **model_kwargs,
     )
     model.config.pad_token_id = tokenizer.pad_token_id
     model.config.problem_type = "single_label_classification"

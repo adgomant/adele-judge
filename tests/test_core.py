@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import importlib.util
 import math
+import subprocess
 import sys
 from types import SimpleNamespace
 
@@ -38,7 +40,7 @@ from adele_judge.hub_pipeline import ADeLeJudgePipeline
 from adele_judge.metrics import all_metrics, majority_binary_baseline
 from adele_judge.inference import predict_dataframe, score_allowed_continuations_batch
 from adele_judge.metrics import majority_ordinal_baseline
-from adele_judge.modeling import model_from_pretrained_kwargs
+from adele_judge.modeling import model_from_pretrained_kwargs, training_device_map
 from adele_judge.splits import fixed_by_model_split, lomo_split
 from adele_judge.tokenization import (
     class_id_to_score,
@@ -49,6 +51,9 @@ from adele_judge.tokenization import (
     validate_score_tokenization,
 )
 from adele_judge.train import (
+    deepspeed_config_dict,
+    distributed_training_args_kwargs,
+    effective_global_batch_size,
     finalist_training_dataframe,
     make_sequence_classification_trainer,
     make_score_compute_metrics,
@@ -684,6 +689,23 @@ def test_training_args_disable_eval_for_finalist_mode(tmp_path):
     assert "eval_steps" not in finalist
 
 
+def test_distributed_config_defaults():
+    cfg = config()
+    cfg["project"] = {"seed": 42}
+    cfg["model"] = {"model_name_or_path": "Qwen/Qwen3-8B"}
+    normalize_config(cfg)
+    validate_config(cfg)
+
+    assert cfg["distributed"]["enabled"] is False
+    assert cfg["distributed"]["strategy"] == "ddp"
+    assert cfg["distributed"]["backend"] == "nccl"
+    assert cfg["distributed"]["fsdp"]["sharding_strategy"] == "full_shard"
+    assert cfg["distributed"]["fsdp"]["activation_checkpointing"] is True
+    assert cfg["training"]["resume_from_checkpoint"] is None
+    assert cfg["distributed"]["deepspeed"]["zero_stage"] == 2
+    assert cfg["distributed"]["deepspeed"]["config_overrides"] == {}
+
+
 def test_config_validates_train_sampling_strategy():
     cfg = config()
     cfg["project"] = {"seed": 42}
@@ -692,6 +714,133 @@ def test_config_validates_train_sampling_strategy():
     normalize_config(cfg)
     with pytest.raises(ValueError, match="train_sampling_strategy"):
         validate_config(cfg)
+
+
+def test_config_rejects_qlora_sharded_training():
+    cfg = config()
+    cfg["project"] = {"seed": 42}
+    cfg["model"] = {"model_name_or_path": "Qwen/Qwen3-8B"}
+    cfg["training"]["load_in_4bit"] = True
+    cfg["distributed"] = {"enabled": True, "strategy": "fsdp"}
+    normalize_config(cfg)
+    with pytest.raises(ValueError, match="QLoRA/4-bit"):
+        validate_config(cfg)
+
+
+def test_distributed_training_args_for_ddp_and_fsdp():
+    cfg = config()
+    cfg["distributed"] = {
+        "enabled": True,
+        "strategy": "ddp",
+        "backend": "nccl",
+        "find_unused_parameters": True,
+        "gradient_checkpointing": True,
+    }
+    normalize_config(cfg)
+    ddp_kwargs = distributed_training_args_kwargs(cfg)
+    assert ddp_kwargs["ddp_backend"] == "nccl"
+    assert ddp_kwargs["ddp_find_unused_parameters"] is True
+    assert ddp_kwargs["gradient_checkpointing"] is True
+
+    cfg["training"]["load_in_4bit"] = False
+    cfg["distributed"] = {
+        "enabled": True,
+        "strategy": "fsdp",
+        "fsdp": {
+            "sharding_strategy": "full_shard",
+            "transformer_layer_cls_to_wrap": "Qwen3DecoderLayer",
+            "activation_checkpointing": True,
+            "use_orig_params": True,
+        },
+    }
+    normalize_config(cfg)
+    fsdp_kwargs = distributed_training_args_kwargs(cfg)
+    assert fsdp_kwargs["fsdp"] == "full_shard auto_wrap"
+    assert fsdp_kwargs["fsdp_config"]["transformer_layer_cls_to_wrap"] == "Qwen3DecoderLayer"
+    assert fsdp_kwargs["fsdp_config"]["activation_checkpointing"] is True
+    assert fsdp_kwargs["fsdp_config"]["use_orig_params"] is True
+
+
+def test_deepspeed_args_require_installed_package():
+    cfg = config()
+    cfg["training"]["load_in_4bit"] = False
+    cfg["distributed"] = {
+        "enabled": True,
+        "strategy": "deepspeed",
+        "deepspeed": {
+            "zero_stage": 3,
+            "offload_optimizer_device": "cpu",
+            "config_overrides": {"zero_optimization": {"overlap_comm": True}},
+        },
+    }
+    normalize_config(cfg)
+    if importlib.util.find_spec("deepspeed") is None:
+        with pytest.raises(ImportError, match="deepspeed package is not installed"):
+            distributed_training_args_kwargs(cfg)
+    else:
+        ds_config = distributed_training_args_kwargs(cfg)["deepspeed"]
+        assert ds_config["zero_optimization"]["stage"] == 3
+        assert ds_config["zero_optimization"]["offload_optimizer"] == {"device": "cpu"}
+        assert ds_config["zero_optimization"]["overlap_comm"] is True
+
+
+def test_deepspeed_config_is_inline_and_uses_auto_trainer_values():
+    cfg = config()
+    cfg["distributed"] = {
+        "enabled": True,
+        "strategy": "deepspeed",
+        "deepspeed": {
+            "zero_stage": 2,
+            "offload_optimizer_device": "none",
+            "offload_param_device": "none",
+            "gradient_clipping": "auto",
+            "config_overrides": {"wall_clock_breakdown": True},
+        },
+    }
+    normalize_config(cfg)
+    ds_config = deepspeed_config_dict(cfg)
+    assert ds_config["zero_optimization"] == {"stage": 2}
+    assert ds_config["bf16"]["enabled"] == "auto"
+    assert ds_config["fp16"]["enabled"] == "auto"
+    assert ds_config["train_micro_batch_size_per_gpu"] == "auto"
+    assert ds_config["gradient_accumulation_steps"] == "auto"
+    assert ds_config["wall_clock_breakdown"] is True
+
+
+def test_distributed_training_device_map_avoids_auto(monkeypatch):
+    cfg = config()
+    cfg["distributed"] = {"enabled": False}
+    normalize_config(cfg)
+    assert training_device_map(cfg) == "auto"
+
+    cfg["distributed"] = {"enabled": True, "strategy": "ddp"}
+    cfg["training"]["load_in_4bit"] = True
+    normalize_config(cfg)
+    monkeypatch.setenv("LOCAL_RANK", "3")
+    assert training_device_map(cfg) == {"": 3}
+
+    cfg["distributed"] = {"enabled": True, "strategy": "fsdp"}
+    cfg["training"]["load_in_4bit"] = False
+    normalize_config(cfg)
+    assert training_device_map(cfg) is None
+
+
+def test_effective_global_batch_size_accounts_for_world_size():
+    cfg = config()
+    cfg["training"]["per_device_train_batch_size"] = 5
+    cfg["training"]["gradient_accumulation_steps"] = 3
+    assert effective_global_batch_size(cfg, world_size=8) == 120
+
+
+def test_module_entrypoint_exposes_cli_help():
+    result = subprocess.run(
+        [sys.executable, "-m", "adele_judge", "--help"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0
+    assert "Train and evaluate the ADeLe distilled judge" in result.stdout
 
 
 def test_score_tokenization_contract_and_fast_inference():

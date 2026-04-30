@@ -78,6 +78,27 @@ def normalize_config(config: dict[str, Any]) -> dict[str, Any]:
     training.setdefault("eval_subset_strategy", "stratified")
     training.setdefault("eval_subset_stratify_columns", ["model_id", "target_score"])
     training.setdefault("max_grad_norm", 1.0)
+    training.setdefault("resume_from_checkpoint", None)
+
+    distributed = config.setdefault("distributed", {})
+    distributed.setdefault("enabled", False)
+    distributed.setdefault("strategy", "ddp")
+    distributed.setdefault("backend", "nccl")
+    distributed.setdefault("mixed_precision", None)
+    distributed.setdefault("gradient_checkpointing", False)
+    distributed.setdefault("find_unused_parameters", False)
+    fsdp = distributed.setdefault("fsdp", {})
+    fsdp.setdefault("sharding_strategy", "full_shard")
+    fsdp.setdefault("transformer_layer_cls_to_wrap", None)
+    fsdp.setdefault("activation_checkpointing", True)
+    fsdp.setdefault("use_orig_params", True)
+    deepspeed = distributed.setdefault("deepspeed", {})
+    deepspeed.setdefault("zero_stage", 2)
+    deepspeed.setdefault("offload_optimizer_device", "none")
+    deepspeed.setdefault("offload_param_device", "none")
+    deepspeed.setdefault("stage3_gather_16bit_weights_on_model_save", True)
+    deepspeed.setdefault("gradient_clipping", "auto")
+    deepspeed.setdefault("config_overrides", {})
 
     inference = config.setdefault("inference", {})
     inference.setdefault("allowed_scores", ["1", "2", "3", "4", "5"])
@@ -179,6 +200,7 @@ def validate_config(config: dict[str, Any]) -> None:
         raise ValueError(
             "training.train_sampling_strategy must be 'random', 'sequential', or 'group_by_length'"
         )
+    validate_distributed_config(config)
 
     method = config["inference"].get("method", "restricted_continuation_logprobs_fast")
     supported_methods = {
@@ -200,3 +222,84 @@ def validate_config(config: dict[str, Any]) -> None:
     validation_fraction = float(config["split"].get("lomo_validation_fraction", 0.05))
     if not 0.0 < validation_fraction < 1.0:
         raise ValueError("split.lomo_validation_fraction must be between 0 and 1")
+
+
+def validate_distributed_config(config: dict[str, Any]) -> None:
+    distributed = config.get("distributed", {})
+    if not isinstance(distributed, dict):
+        raise ValueError("distributed must be a mapping")
+
+    strategy = distributed.get("strategy", "ddp")
+    if strategy not in {"ddp", "fsdp", "deepspeed"}:
+        raise ValueError("distributed.strategy must be 'ddp', 'fsdp', or 'deepspeed'")
+
+    backend = distributed.get("backend", "nccl")
+    if backend not in {"nccl", "gloo", "mpi", "xccl", "hccl", "cncl", "mccl"}:
+        raise ValueError("distributed.backend must be a supported torch distributed backend")
+
+    mixed_precision = _normalized_precision(distributed.get("mixed_precision"))
+    training_precision = _normalized_precision(config["training"].get("dtype"))
+    if mixed_precision not in {None, "no", "bf16", "fp16"}:
+        raise ValueError("distributed.mixed_precision must be null, 'no', 'bf16', or 'fp16'")
+    if mixed_precision not in {None, "no"} and training_precision != mixed_precision:
+        raise ValueError("distributed.mixed_precision must match training.dtype")
+
+    fsdp = distributed.get("fsdp", {})
+    if not isinstance(fsdp, dict):
+        raise ValueError("distributed.fsdp must be a mapping")
+    if fsdp.get("sharding_strategy", "full_shard") not in {
+        "full_shard",
+        "shard_grad_op",
+        "hybrid_shard",
+        "hybrid_shard_zero2",
+        "no_shard",
+    }:
+        raise ValueError("distributed.fsdp.sharding_strategy is not supported")
+    transformer_layer = fsdp.get("transformer_layer_cls_to_wrap")
+    if transformer_layer is not None and not isinstance(transformer_layer, (str, list)):
+        raise ValueError("distributed.fsdp.transformer_layer_cls_to_wrap must be null, a string, or a list")
+    if isinstance(transformer_layer, list) and not all(isinstance(item, str) for item in transformer_layer):
+        raise ValueError("distributed.fsdp.transformer_layer_cls_to_wrap list entries must be strings")
+
+    deepspeed = distributed.get("deepspeed", {})
+    if not isinstance(deepspeed, dict):
+        raise ValueError("distributed.deepspeed must be a mapping")
+    zero_stage = int(deepspeed.get("zero_stage", 2))
+    if zero_stage not in {1, 2, 3}:
+        raise ValueError("distributed.deepspeed.zero_stage must be 1, 2, or 3")
+    for key in ["offload_optimizer_device", "offload_param_device"]:
+        if deepspeed.get(key, "none") not in {"none", "cpu", "nvme"}:
+            raise ValueError(f"distributed.deepspeed.{key} must be 'none', 'cpu', or 'nvme'")
+    if not isinstance(deepspeed.get("config_overrides", {}), dict):
+        raise ValueError("distributed.deepspeed.config_overrides must be a mapping")
+
+    if not bool(distributed.get("enabled", False)):
+        return
+
+    if (
+        strategy == "fsdp"
+        and bool(distributed.get("gradient_checkpointing", False))
+        and bool(fsdp.get("activation_checkpointing", True))
+    ):
+        raise ValueError(
+            "Use either distributed.gradient_checkpointing or "
+            "distributed.fsdp.activation_checkpointing, not both."
+        )
+    if strategy in {"fsdp", "deepspeed"} and bool(config["training"].get("load_in_4bit", True)):
+        raise ValueError(
+            "QLoRA/4-bit training is only supported for single-GPU or DDP in this project. "
+            "Set training.load_in_4bit=false for FSDP or DeepSpeed."
+        )
+
+
+def _normalized_precision(value: Any) -> str | None:
+    if value is None:
+        return None
+    normalized = str(value).lower()
+    if normalized in {"bf16", "bfloat16"}:
+        return "bf16"
+    if normalized in {"fp16", "float16"}:
+        return "fp16"
+    if normalized in {"fp32", "float32", "no", "none"}:
+        return "no"
+    return normalized

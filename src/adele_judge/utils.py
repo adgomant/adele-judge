@@ -107,7 +107,18 @@ def git_commit() -> str | None:
 
 
 def package_versions() -> dict[str, str]:
-    packages = ["python", "torch", "transformers", "datasets", "peft", "trl", "unsloth"]
+    packages = [
+        "python",
+        "torch",
+        "transformers",
+        "datasets",
+        "accelerate",
+        "bitsandbytes",
+        "peft",
+        "trl",
+        "unsloth",
+        "deepspeed",
+    ]
     versions = {"python": sys.version.split()[0]}
     for package in packages:
         if package == "python":

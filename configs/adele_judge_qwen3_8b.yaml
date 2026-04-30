@@ -122,6 +122,28 @@ training:
   save_steps: 3000
   save_total_limit: 10
   seed: 42
+  resume_from_checkpoint: null
+
+distributed:
+  enabled: false
+  strategy: ddp
+  backend: nccl
+  mixed_precision: null
+  gradient_checkpointing: false
+  find_unused_parameters: false
+  fsdp:
+    sharding_strategy: full_shard
+    # For Qwen3 FSDP runs set this to Qwen3DecoderLayer.
+    transformer_layer_cls_to_wrap: null
+    activation_checkpointing: true
+    use_orig_params: true
+  deepspeed:
+    zero_stage: 2
+    offload_optimizer_device: none
+    offload_param_device: none
+    stage3_gather_16bit_weights_on_model_save: true
+    gradient_clipping: auto
+    config_overrides: {}
 
 inference:
   allowed_scores: ["1", "2", "3", "4", "5"]
