@@ -80,6 +80,101 @@ def jsonable(data: Any) -> Any:
     return data
 
 
+def _env_int(name: str, default: int) -> int:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except ValueError:
+        return default
+
+
+def get_rank() -> int:
+    return _env_int("RANK", 0)
+
+
+def get_local_rank() -> int:
+    return _env_int("LOCAL_RANK", 0)
+
+
+def get_world_size() -> int:
+    return _env_int("WORLD_SIZE", 1)
+
+
+def is_distributed() -> bool:
+    if get_world_size() > 1:
+        return True
+    try:
+        import torch.distributed as dist
+
+        return dist.is_available() and dist.is_initialized()
+    except Exception:
+        return False
+
+
+def is_main_process() -> bool:
+    return get_rank() == 0
+
+
+def setup_distributed_device() -> Any | None:
+    """Pin this process to LOCAL_RANK before CUDA/distributed setup."""
+
+    try:
+        import torch
+    except Exception:
+        return None
+
+    if not torch.cuda.is_available():
+        return None
+    local_rank = get_local_rank()
+    torch.cuda.set_device(local_rank)
+    return torch.device(f"cuda:{local_rank}")
+
+
+def init_process_group(*args: Any, **kwargs: Any) -> None:
+    """Initialize torch.distributed with NCCL device_id when supported."""
+
+    import torch
+    import torch.distributed as dist
+
+    setup_distributed_device()
+    backend = kwargs.get("backend")
+    if backend is None and args:
+        backend = args[0]
+    use_device_id = str(backend).lower() == "nccl" and torch.cuda.is_available()
+    if use_device_id and "device_id" not in kwargs:
+        kwargs["device_id"] = torch.device(f"cuda:{get_local_rank()}")
+    try:
+        dist.init_process_group(*args, **kwargs)
+    except TypeError:
+        kwargs.pop("device_id", None)
+        dist.init_process_group(*args, **kwargs)
+
+
+def barrier() -> None:
+    try:
+        import torch
+        import torch.distributed as dist
+    except Exception:
+        return
+
+    if not dist.is_available() or not dist.is_initialized():
+        return
+    try:
+        backend = dist.get_backend()
+    except Exception:
+        backend = ""
+    if torch.cuda.is_available() and str(backend).lower() == "nccl":
+        setup_distributed_device()
+        try:
+            dist.barrier(device_ids=[get_local_rank()])
+            return
+        except TypeError:
+            pass
+    dist.barrier()
+
+
 def stable_json_hash(data: Any) -> str:
     encoded = json.dumps(jsonable(data), sort_keys=True, separators=(",", ":")).encode("utf-8")
     return sha256(encoded).hexdigest()

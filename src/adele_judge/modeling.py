@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-import os
 from pathlib import Path
 from typing import Any
 from warnings import warn
 
 from .formatting import configure_tokenizer_thinking_mode
+from .utils import get_local_rank, setup_distributed_device
 
 
 COMMON_LORA_TARGET_MODULES = [
@@ -89,11 +89,13 @@ def training_device_map(config: dict[str, Any]) -> str | dict[str, int] | None:
             )
         return None
     if bool(config["training"].get("load_in_4bit", True)):
-        return {"": int(os.environ.get("LOCAL_RANK", "0"))}
+        return {"": get_local_rank()}
     return None
 
 
 def load_model_for_training(config: dict[str, Any]) -> tuple[Any, Any]:
+    if distributed_training_enabled(config):
+        setup_distributed_device()
     if config["training"].get("objective") == "sequence_classification":
         return load_sequence_classification_model_for_training(config)
     if distributed_training_enabled(config):

@@ -62,7 +62,17 @@ from adele_judge.train import (
     select_eval_subset,
     training_args_kwargs,
 )
-from adele_judge.utils import read_json, tee_output, write_json
+from adele_judge.utils import (
+    get_local_rank,
+    get_rank,
+    get_world_size,
+    is_distributed,
+    is_main_process,
+    read_json,
+    setup_distributed_device,
+    tee_output,
+    write_json,
+)
 
 
 runner = CliRunner()
@@ -828,6 +838,44 @@ def test_distributed_training_device_map_avoids_auto(monkeypatch):
     cfg["training"]["load_in_4bit"] = False
     normalize_config(cfg)
     assert training_device_map(cfg) is None
+
+
+def test_distributed_env_helpers_default_to_single_process(monkeypatch):
+    monkeypatch.delenv("RANK", raising=False)
+    monkeypatch.delenv("LOCAL_RANK", raising=False)
+    monkeypatch.delenv("WORLD_SIZE", raising=False)
+
+    assert get_rank() == 0
+    assert get_local_rank() == 0
+    assert get_world_size() == 1
+    assert is_main_process() is True
+    assert is_distributed() is False
+
+
+def test_distributed_env_helpers_read_torchrun_env(monkeypatch):
+    monkeypatch.setenv("RANK", "3")
+    monkeypatch.setenv("LOCAL_RANK", "3")
+    monkeypatch.setenv("WORLD_SIZE", "8")
+
+    assert get_rank() == 3
+    assert get_local_rank() == 3
+    assert get_world_size() == 8
+    assert is_main_process() is False
+    assert is_distributed() is True
+
+
+def test_setup_distributed_device_uses_local_rank(monkeypatch):
+    import torch
+
+    calls = []
+    monkeypatch.setenv("LOCAL_RANK", "2")
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "set_device", lambda device: calls.append(device))
+
+    device = setup_distributed_device()
+
+    assert calls == [2]
+    assert str(device) == "cuda:2"
 
 
 def test_effective_global_batch_size_accounts_for_world_size():

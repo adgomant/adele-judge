@@ -23,9 +23,11 @@ from .tokenization import (
 from .utils import (
     ensure_dir,
     git_commit,
+    is_main_process,
     package_versions,
     project_output_dir,
     set_seed,
+    setup_distributed_device,
     stable_json_hash,
     write_json,
 )
@@ -106,7 +108,7 @@ def tokenize_training_dataframe(df: Any, tokenizer: Any, config: dict[str, Any])
     )
     rows = [row for row in tokenized_rows if row is not None]
     skipped = len(tokenized_rows) - len(rows)
-    if skipped:
+    if skipped and is_main_process():
         print(f"Skipped {skipped} overflowing examples during tokenization")
     if bool(config["training"].get("packing", False)):
         rows = pack_tokenized_rows(rows, int(config["training"]["max_seq_length"]))
@@ -671,6 +673,9 @@ def training_args_kwargs(
         kwargs["warmup_steps"] = int(training["warmup_steps"])
     elif "warmup_ratio" in training:
         kwargs["warmup_ratio"] = float(training["warmup_ratio"])
+    if bool(config.get("distributed", {}).get("enabled", False)):
+        kwargs["disable_tqdm"] = not is_main_process()
+        kwargs["log_on_each_node"] = False
     kwargs.update(distributed_training_args_kwargs(config))
     return kwargs
 
@@ -725,6 +730,7 @@ def train_judge(
     *,
     finalist: bool = False,
 ) -> dict[str, Any]:
+    setup_distributed_device()
     seed = int(config["training"].get("seed", config["project"].get("seed", 42)))
     set_seed(seed)
     output_dir = ensure_dir(project_output_dir(config))
@@ -746,7 +752,11 @@ def train_judge(
         )
 
     with args.main_process_first(local=False, desc="prepare dataset"):
-        splits = load_or_prepare_splits(config, tokenizer, force_prepare=force_prepare)
+        splits = load_or_prepare_splits(
+            config,
+            tokenizer,
+            force_prepare=force_prepare and args.should_save,
+        )
     split_counts = source_split_counts(splits)
     training_df = finalist_training_dataframe(splits) if finalist else splits["train"]
     eval_split = None if finalist else select_eval_subset(splits["validation"], config)

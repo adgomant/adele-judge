@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 from copy import deepcopy
 from enum import Enum
 from pathlib import Path
@@ -22,7 +21,14 @@ from .reporting import save_prediction_reports
 from .splits import enumerate_lomo_models
 from .tokenization import supervised_token_debug_rows
 from .train import train_judge
-from .utils import ensure_dir, project_output_dir, tee_output, write_json
+from .utils import (
+    ensure_dir,
+    is_main_process,
+    project_output_dir,
+    setup_distributed_device,
+    tee_output,
+    write_json,
+)
 
 
 class SplitName(str, Enum):
@@ -68,12 +74,15 @@ app = typer.Typer(
 def _load_config(path: Path, overrides: list[str] | None) -> dict[str, Any]:
     config = load_config(path, overrides or [])
     run_name = config.get("project", {}).get("run_name", "unknown")
-    console.print(f"[bold]Run:[/] {run_name}")
-    console.print(f"[bold]Output:[/] {project_output_dir(config)}")
+    if is_main_process():
+        console.print(f"[bold]Run:[/] {run_name}")
+        console.print(f"[bold]Output:[/] {project_output_dir(config)}")
     return config
 
 
 def _print_split_summary(splits: dict[str, pd.DataFrame]) -> None:
+    if not is_main_process():
+        return
     table = Table(title="Prepared Splits")
     table.add_column("Split", style="cyan")
     table.add_column("Examples", justify="right")
@@ -84,6 +93,8 @@ def _print_split_summary(splits: dict[str, pd.DataFrame]) -> None:
 
 
 def _print_metrics(metrics: dict[str, Any], title: str) -> None:
+    if not is_main_process():
+        return
     table = Table(title=title)
     table.add_column("Metric", style="cyan")
     table.add_column("Value", overflow="fold")
@@ -91,16 +102,6 @@ def _print_metrics(metrics: dict[str, Any], title: str) -> None:
         rendered = json.dumps(value, sort_keys=True) if isinstance(value, dict) else str(value)
         table.add_row(key, rendered)
     console.print(table)
-
-
-def _env_world_process_zero() -> bool:
-    rank = os.environ.get("RANK")
-    if rank is not None:
-        return int(rank) == 0
-    local_rank = os.environ.get("LOCAL_RANK")
-    if local_rank is not None:
-        return int(local_rank) == 0
-    return True
 
 
 @app.command()
@@ -112,7 +113,8 @@ def prepare(
     run_config = _load_config(config, override)
     splits = prepare_dataset(run_config)
     _print_split_summary(splits)
-    console.print("[green]Prepared dataset artifacts.[/]")
+    if is_main_process():
+        console.print("[green]Prepared dataset artifacts.[/]")
 
 
 @app.command()
@@ -135,9 +137,10 @@ def train(
     override: OverrideOption = None,
 ) -> None:
     """Train the judge adapter."""
+    setup_distributed_device()
     run_config = load_config(config, override or [])
     log_path = project_output_dir(run_config) / "training.log"
-    if not _env_world_process_zero():
+    if not is_main_process():
         train_judge(run_config, force_prepare=force_prepare, finalist=finalist)
         return
     with tee_output(log_path):

@@ -20,6 +20,7 @@ from .tokenization import validate_score_tokenization
 from .utils import (
     ensure_dir,
     file_sha256,
+    is_main_process,
     package_versions,
     prepared_dir,
     project_output_dir,
@@ -92,7 +93,7 @@ def load_or_prepare_splits(
                     name: pd.read_parquet(pdir / f"{name}.parquet")
                     for name in ["train", "validation", "test"]
                 }
-        else:
+        elif is_main_process():
             print(f"Prepared split fingerprint missing at {stored_path}; rebuilding splits.")
     return prepare_dataset(config, tokenizer)
 
