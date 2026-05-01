@@ -9,7 +9,6 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
-from rich.progress import track
 
 from .config import copy_config, save_config
 from .formatting import tokenizer_thinking_template_kwargs
@@ -17,8 +16,8 @@ from .metrics import all_metrics, binary_from_score
 from .modeling import load_model_for_training
 from .pipeline import load_or_prepare_splits
 from .tokenization import (
-    tokenize_classification_example,
-    tokenize_supervised_example,
+    preprocessing_num_workers,
+    tokenized_training_rows,
     validate_score_tokenization,
 )
 from .utils import (
@@ -96,43 +95,17 @@ def tokenize_training_dataframe(df: Any, tokenizer: Any, config: dict[str, Any])
     max_seq_length = int(config["training"]["max_seq_length"])
     overflow = config["data"]["filters"].get("on_sequence_overflow", "skip")
     objective = config["training"].get("objective", "causal_lm")
-    rows = []
-    skipped = 0
-    for _, row in track(
-        df.iterrows(),
-        total=len(df),
-        description="Tokenizing training rows",
-    ):
-        example = row.to_dict()
-        if objective == "sequence_classification":
-            tokenized = tokenize_classification_example(
-                example,
-                tokenizer,
-                system_prompt,
-                max_seq_length,
-                overflow,
-            )
-        else:
-            tokenized = tokenize_supervised_example(
-                example,
-                tokenizer,
-                system_prompt,
-                max_seq_length,
-                overflow,
-            )
-        if tokenized is None:
-            skipped += 1
-            continue
-        rows.append(
-            {
-                "input_ids": tokenized.input_ids,
-                "attention_mask": tokenized.attention_mask,
-                "labels": tokenized.labels,
-                "length": tokenized.sequence_length,
-                "prompt_length": tokenized.prompt_length,
-                "target_score": int(row["target_score"]),
-            }
-        )
+    tokenized_rows = tokenized_training_rows(
+        df.to_dict("records"),
+        tokenizer,
+        system_prompt=system_prompt,
+        max_seq_length=max_seq_length,
+        overflow=overflow,
+        objective=objective,
+        num_workers=preprocessing_num_workers(config),
+    )
+    rows = [row for row in tokenized_rows if row is not None]
+    skipped = len(tokenized_rows) - len(rows)
     if skipped:
         print(f"Skipped {skipped} overflowing examples during tokenization")
     if bool(config["training"].get("packing", False)):

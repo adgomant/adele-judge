@@ -277,6 +277,16 @@ data:
 
 `data.filters.max_response_tokens` and `training.max_seq_length` are intentionally separate gates. The response cap applies only to the model response before prompt formatting. The sequence cap applies later to the full chat-formatted training example, including the system prompt, question, reference answer, response, chat-template tokens, and score target. Passing the response cap does not guarantee that an example fits in `max_seq_length`.
 
+CPU preprocessing defaults to all cores visible to the process:
+
+```yaml
+data:
+  preprocessing_num_workers: auto
+  tokenizers_parallelism: true
+```
+
+`preprocessing_num_workers` controls full-example chat formatting, sequence-length checks, and train-time tokenization. Use `1` for serial preprocessing, a positive integer for an explicit worker count, or `auto`/`all`/`0`/`-1` for all available cores. `tokenizers_parallelism` enables the fast tokenizer thread pool used by batched response-length measurement.
+
 ## Training Behavior
 
 The default config trains with restricted 5-way score cross-entropy over the score token ids. The baseline `causal_lm` objective is still available; in that mode labels are masked so standard causal language-model loss is applied only to the assistant score continuation:
@@ -383,6 +393,20 @@ uv run accelerate launch --multi_gpu --num_processes 8 -m adele_judge train \
   --config configs/adele_judge_qwen3_8b.yaml \
   --override distributed.enabled=true \
   --override distributed.strategy=ddp
+```
+
+A ready-to-submit single-node 8-GPU job is available at
+`scripts/slurm/prepare_train_8gpu.slurm`. It runs `adele-judge prepare` once,
+then launches 8 DDP training processes with `torchrun`:
+
+```bash
+sbatch scripts/slurm/prepare_train_8gpu.slurm
+```
+
+Override the config path at submit time when needed:
+
+```bash
+sbatch --export=ALL,CONFIG=configs/adele_judge_qwen3_8b.yaml scripts/slurm/prepare_train_8gpu.slurm
 ```
 
 Limitations:

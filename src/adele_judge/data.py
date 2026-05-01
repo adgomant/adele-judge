@@ -5,14 +5,13 @@ from typing import Any
 
 import numpy as np
 import pandas as pd
-from rich.progress import track
 
 from .config import column_name
 from .formatting import clean_value
 from .tokenization import (
     batch_response_token_lengths,
-    tokenize_classification_example,
-    tokenize_supervised_example,
+    preprocessing_num_workers,
+    sequence_length_rows,
 )
 
 
@@ -151,42 +150,19 @@ def add_sequence_lengths_and_filter(
     overflow_mode = config["data"]["filters"].get("on_sequence_overflow", "skip")
     system_prompt = config["prompt"]["system_prompt"]
     objective = config["training"].get("objective", "causal_lm")
-    prompt_lengths: list[int | float] = []
-    target_lengths: list[int | float] = []
-    sequence_lengths: list[int | float] = []
-    keep: list[bool] = []
-    for _, row in track(
-        df.iterrows(),
-        total=len(df),
-        description="Checking sequence lengths",
-    ):
-        example = row.to_dict()
-        if objective == "sequence_classification":
-            tokenized = tokenize_classification_example(
-                example,
-                tokenizer,
-                system_prompt,
-                max_seq_length,
-                overflow_mode,
-            )
-        else:
-            tokenized = tokenize_supervised_example(
-                example,
-                tokenizer,
-                system_prompt,
-                max_seq_length,
-                overflow_mode,
-            )
-        if tokenized is None:
-            prompt_lengths.append(np.nan)
-            target_lengths.append(np.nan)
-            sequence_lengths.append(np.nan)
-            keep.append(False)
-        else:
-            prompt_lengths.append(tokenized.prompt_length)
-            target_lengths.append(getattr(tokenized, "target_length", 0))
-            sequence_lengths.append(tokenized.sequence_length)
-            keep.append(True)
+    results = sequence_length_rows(
+        df.to_dict("records"),
+        tokenizer,
+        system_prompt=system_prompt,
+        max_seq_length=max_seq_length,
+        overflow=overflow_mode,
+        objective=objective,
+        num_workers=preprocessing_num_workers(config),
+    )
+    prompt_lengths = [item[0] for item in results]
+    target_lengths = [item[1] for item in results]
+    sequence_lengths = [item[2] for item in results]
+    keep = [item[3] for item in results]
 
     out = df.copy()
     out["prompt_token_length"] = prompt_lengths

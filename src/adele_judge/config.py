@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import os
 from pathlib import Path
 from typing import Any
 
@@ -47,6 +48,11 @@ def column_name(config: dict[str, Any], logical_name: str) -> str | None:
 
 
 def normalize_config(config: dict[str, Any]) -> dict[str, Any]:
+    data = config.get("data")
+    if isinstance(data, dict):
+        data.setdefault("preprocessing_num_workers", "auto")
+        data.setdefault("tokenizers_parallelism", True)
+
     model = config.setdefault("model", {})
     if "model_name_or_path" not in model and "name_or_path" in model:
         model["model_name_or_path"] = model["name_or_path"]
@@ -126,7 +132,48 @@ def normalize_config(config: dict[str, Any]) -> dict[str, Any]:
     hub.setdefault("output_staging_dir", None)
     hub.setdefault("create_pr", False)
     hub.setdefault("max_shard_size", "5GB")
+    configure_cpu_environment(config)
     return config
+
+
+def available_cpu_count() -> int:
+    if hasattr(os, "sched_getaffinity"):
+        try:
+            return max(1, len(os.sched_getaffinity(0)))
+        except OSError:
+            pass
+    return max(1, os.cpu_count() or 1)
+
+
+def resolve_num_workers(value: Any, *, default: int = 1) -> int:
+    if value is None:
+        return default
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"auto", "all", "-1"}:
+            return available_cpu_count()
+        value = int(normalized)
+    workers = int(value)
+    if workers < 1:
+        return available_cpu_count()
+    return workers
+
+
+def configure_cpu_environment(config: dict[str, Any]) -> None:
+    data = config.get("data", {})
+    if not isinstance(data, dict):
+        return
+
+    parallelism = data.get("tokenizers_parallelism", True)
+    if parallelism is not None:
+        os.environ.setdefault(
+            "TOKENIZERS_PARALLELISM",
+            "true" if bool(parallelism) else "false",
+        )
+
+    workers = resolve_num_workers(data.get("preprocessing_num_workers", 1))
+    if workers > 0:
+        os.environ.setdefault("RAYON_NUM_THREADS", str(workers))
 
 
 def validate_config(config: dict[str, Any]) -> None:
@@ -200,6 +247,13 @@ def validate_config(config: dict[str, Any]) -> None:
         raise ValueError(
             "training.train_sampling_strategy must be 'random', 'sequential', or 'group_by_length'"
         )
+    preprocessing_workers = config.get("data", {}).get("preprocessing_num_workers", 1)
+    try:
+        resolve_num_workers(preprocessing_workers)
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            "data.preprocessing_num_workers must be a positive integer, 0, -1, 'auto', or 'all'"
+        ) from exc
     validate_distributed_config(config)
 
     method = config["inference"].get("method", "restricted_continuation_logprobs_fast")
