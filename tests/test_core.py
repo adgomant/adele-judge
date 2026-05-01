@@ -176,10 +176,11 @@ class FakeThinkingChatTokenizer(FakeTokenizer):
 
 
 class AlwaysFiveModel:
-    def __init__(self):
+    def __init__(self, *, logits_dtype=None):
         import torch
 
         self.param = torch.nn.Parameter(torch.zeros(1))
+        self.logits_dtype = logits_dtype
         self.calls = 0
         self.config = SimpleNamespace(
             task_specific_params=None,
@@ -206,7 +207,11 @@ class AlwaysFiveModel:
         import torch
 
         self.calls += 1
-        logits = torch.zeros((*input_ids.shape, 128), device=input_ids.device)
+        logits = torch.zeros(
+            (*input_ids.shape, 128),
+            device=input_ids.device,
+            dtype=self.logits_dtype,
+        )
         logits[:, :, ord("5")] = 10.0
         return SimpleNamespace(logits=logits)
 
@@ -855,6 +860,18 @@ def test_score_tokenization_contract_and_fast_inference():
     )
     assert [row["pred_score"] for row in scored] == [5, 5]
     assert {row["scoring_method"] for row in scored} == {"single_forward_single_token"}
+
+
+def test_fast_inference_accepts_bfloat16_logits():
+    import torch
+
+    scored = score_allowed_continuations_batch(
+        AlwaysFiveModel(logits_dtype=torch.bfloat16),
+        FakeTokenizer(),
+        ["prompt A"],
+        ["1", "2", "3", "4", "5"],
+    )
+    assert scored[0]["pred_score"] == 5
 
 
 def test_empty_prediction_dataframe_keeps_report_columns():

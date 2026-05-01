@@ -177,7 +177,7 @@ def _score_single_token_batch(
         dtype=torch.long,
         device=device,
     )
-    score_logprobs = full_log_probs[:, score_ids].detach().cpu().numpy()
+    score_logprobs = full_log_probs[:, score_ids].detach().float().cpu().numpy()
     prompt_lengths_np = prompt_lengths.detach().cpu().numpy()
     outputs = []
     for row_index, row_logprobs in enumerate(score_logprobs):
