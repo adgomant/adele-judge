@@ -3,7 +3,6 @@ from __future__ import annotations
 import multiprocessing as mp
 import os
 from dataclasses import dataclass
-from math import ceil
 from typing import Any
 
 from rich.progress import track
@@ -211,6 +210,27 @@ def _init_tokenization_worker(
     _WORKER_OBJECTIVE = objective
 
 
+def _init_response_token_worker(tokenizer: Any, limit_tokenizer_threads: bool = True) -> None:
+    global _WORKER_TOKENIZER
+
+    if limit_tokenizer_threads:
+        os.environ["TOKENIZERS_PARALLELISM"] = "false"
+        os.environ["RAYON_NUM_THREADS"] = "1"
+    _WORKER_TOKENIZER = tokenizer
+
+
+def _response_token_lengths_worker(texts: list[str]) -> list[int]:
+    if _WORKER_TOKENIZER is None:
+        raise RuntimeError("Response tokenization worker was not initialized")
+    encoded = _WORKER_TOKENIZER(
+        texts,
+        add_special_tokens=False,
+        truncation=False,
+        padding=False,
+    )
+    return [len(ids) for ids in encoded["input_ids"]]
+
+
 def _tokenize_with_worker_settings(
     example: dict[str, Any],
 ) -> TokenizedExample | TokenizedClassificationExample | None:
@@ -396,17 +416,35 @@ def batch_response_token_lengths(
     texts: list[str],
     tokenizer: Any,
     batch_size: int = 512,
+    num_workers: int = 1,
 ) -> list[int]:
+    if not texts:
+        return []
+
+    batches = [texts[start : start + batch_size] for start in range(0, len(texts), batch_size)]
+    if num_workers <= 1 or len(batches) < 2:
+        _init_response_token_worker(tokenizer, False)
+        lengths: list[int] = []
+        for batch in track(
+            batches,
+            total=len(batches),
+            description=f"Measuring response tokens ({num_workers} worker)",
+        ):
+            lengths.extend(_response_token_lengths_worker(batch))
+        return lengths
+
+    worker_count = min(num_workers, len(batches))
     lengths: list[int] = []
-    starts = range(0, len(texts), batch_size)
-    total = ceil(len(texts) / batch_size) if texts else 0
-    for start in track(starts, total=total, description="Measuring response tokens"):
-        batch = texts[start : start + batch_size]
-        encoded = tokenizer(
-            batch,
-            add_special_tokens=False,
-            truncation=False,
-            padding=False,
-        )
-        lengths.extend(len(ids) for ids in encoded["input_ids"])
+    context = mp.get_context("spawn")
+    with context.Pool(
+        processes=worker_count,
+        initializer=_init_response_token_worker,
+        initargs=(tokenizer, True),
+    ) as pool:
+        for batch_lengths in track(
+            pool.imap(_response_token_lengths_worker, batches),
+            total=len(batches),
+            description=f"Measuring response tokens ({worker_count} workers)",
+        ):
+            lengths.extend(batch_lengths)
     return lengths

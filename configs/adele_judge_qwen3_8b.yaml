@@ -25,8 +25,9 @@ data:
     # Full-sequence overflow policy after chat formatting. Passing max_response_tokens
     # does not guarantee that an example fits in max_seq_length.
     on_sequence_overflow: skip
-  # "auto" uses all CPU cores visible to the process for sequence checks and
-  # train-time tokenization. Set to 1 for serial preprocessing.
+  # "auto" uses all CPU cores visible to the process for response length
+  # measurement, sequence checks, and train-time tokenization.
+  # Set to 1 for serial preprocessing.
   preprocessing_num_workers: auto
   # Lets fast Hugging Face tokenizers use their native thread pool for batched
   # response-length measurements.

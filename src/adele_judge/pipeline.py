@@ -16,7 +16,7 @@ from .data import (
 from .formatting import configure_tokenizer_thinking_mode, tokenizer_thinking_template_kwargs
 from .modeling import load_tokenizer
 from .splits import create_splits, split_report
-from .tokenization import validate_score_tokenization
+from .tokenization import preprocessing_num_workers, validate_score_tokenization
 from .utils import (
     ensure_dir,
     file_sha256,
@@ -48,6 +48,7 @@ def prepare_dataset(config: dict[str, Any], tokenizer: Any | None = None) -> dic
         df,
         tokenizer,
         batch_size=int(config["data"].get("token_length_batch_size", 512)),
+        num_workers=preprocessing_num_workers(config),
     )
     filtered, filter_report = apply_configured_filters(df, config)
     filtered, sequence_report = add_sequence_lengths_and_filter(filtered, tokenizer, config)

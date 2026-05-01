@@ -94,10 +94,16 @@ def add_response_token_lengths(
     df: pd.DataFrame,
     tokenizer: Any,
     batch_size: int = 512,
+    num_workers: int = 1,
 ) -> pd.DataFrame:
     out = df.copy()
     texts = [clean_value(x, fallback="") for x in out["response"].tolist()]
-    out["response_token_length"] = batch_response_token_lengths(texts, tokenizer, batch_size)
+    out["response_token_length"] = batch_response_token_lengths(
+        texts,
+        tokenizer,
+        batch_size,
+        num_workers=num_workers,
+    )
     return out
 
 

@@ -285,7 +285,7 @@ data:
   tokenizers_parallelism: true
 ```
 
-`preprocessing_num_workers` controls full-example chat formatting, sequence-length checks, and train-time tokenization. Use `1` for serial preprocessing, a positive integer for an explicit worker count, or `auto`/`all`/`0`/`-1` for all available cores. `tokenizers_parallelism` enables the fast tokenizer thread pool used by batched response-length measurement.
+`preprocessing_num_workers` controls response-token length measurement, full-example chat formatting, sequence-length checks, and train-time tokenization. Use `1` for serial preprocessing, a positive integer for an explicit worker count, or `auto`/`all`/`0`/`-1` for all available cores. `tokenizers_parallelism` enables the fast tokenizer thread pool used when preprocessing runs serially.
 
 ## Training Behavior
 

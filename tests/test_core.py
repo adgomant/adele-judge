@@ -43,6 +43,7 @@ from adele_judge.metrics import majority_ordinal_baseline
 from adele_judge.modeling import model_from_pretrained_kwargs, training_device_map
 from adele_judge.splits import fixed_by_model_split, lomo_split
 from adele_judge.tokenization import (
+    batch_response_token_lengths,
     class_id_to_score,
     score_to_class_id,
     tokenize_classification_example,
@@ -590,6 +591,16 @@ def test_response_filter_is_independent_from_sequence_filter():
     filtered, report = apply_configured_filters(df, config())
     assert filtered["response_token_length"].tolist() == [4096, 10]
     assert report["removed_by_response_length"] == 1
+
+
+def test_response_token_lengths_can_use_worker_batches():
+    lengths = batch_response_token_lengths(
+        ["a", "bc", "", "def"],
+        FakeTokenizer(),
+        batch_size=2,
+        num_workers=2,
+    )
+    assert lengths == [1, 2, 0, 3]
 
 
 def test_sequence_filter_adds_prompt_target_and_budget_report():
