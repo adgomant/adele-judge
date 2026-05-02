@@ -60,8 +60,10 @@ from adele_judge.train import (
     make_score_compute_metrics,
     make_score_logits_preprocessor,
     pack_tokenized_rows,
+    resolved_warmup_steps,
     select_eval_subset,
     training_args_kwargs,
+    total_optimization_steps,
 )
 from adele_judge.utils import (
     get_local_rank,
@@ -713,6 +715,76 @@ def test_training_args_disable_eval_for_finalist_mode(tmp_path):
     assert standard["train_sampling_strategy"] == "random"
     assert finalist["eval_strategy"] == "no"
     assert "eval_steps" not in finalist
+
+
+def test_training_args_resolve_warmup_ratio_to_steps(tmp_path):
+    cfg = config()
+    cfg["training"].update(
+        {
+            "num_train_epochs": 2,
+            "per_device_train_batch_size": 5,
+            "per_device_eval_batch_size": 3,
+            "gradient_accumulation_steps": 3,
+            "learning_rate": 1.0e-4,
+            "lr_scheduler_type": "cosine",
+            "weight_decay": 0.0,
+            "optim": "adamw_torch",
+            "logging_steps": 5,
+            "eval_steps": 6,
+            "save_steps": 7,
+            "save_total_limit": 8,
+            "dtype": "float32",
+            "warmup_ratio": 0.1,
+        }
+    )
+    kwargs = training_args_kwargs(
+        cfg,
+        tmp_path,
+        42,
+        evaluation_enabled=True,
+        train_examples=101,
+        world_size=2,
+    )
+
+    assert total_optimization_steps(101, cfg, world_size=2) == 8
+    assert resolved_warmup_steps(101, cfg, world_size=2) == 1
+    assert kwargs["warmup_ratio"] == 0.1
+    assert kwargs["warmup_steps"] == 1
+
+
+def test_explicit_warmup_steps_override_ratio(tmp_path):
+    cfg = config()
+    cfg["training"].update(
+        {
+            "num_train_epochs": 2,
+            "per_device_train_batch_size": 5,
+            "per_device_eval_batch_size": 3,
+            "gradient_accumulation_steps": 3,
+            "learning_rate": 1.0e-4,
+            "lr_scheduler_type": "cosine",
+            "weight_decay": 0.0,
+            "optim": "adamw_torch",
+            "logging_steps": 5,
+            "eval_steps": 6,
+            "save_steps": 7,
+            "save_total_limit": 8,
+            "dtype": "float32",
+            "warmup_ratio": 0.1,
+            "warmup_steps": 12,
+        }
+    )
+    kwargs = training_args_kwargs(
+        cfg,
+        tmp_path,
+        42,
+        evaluation_enabled=True,
+        train_examples=101,
+        world_size=2,
+    )
+
+    assert resolved_warmup_steps(101, cfg, world_size=2) == 12
+    assert kwargs["warmup_steps"] == 12
+    assert "warmup_ratio" not in kwargs
 
 
 def test_distributed_config_defaults():

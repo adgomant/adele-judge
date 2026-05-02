@@ -319,12 +319,15 @@ Packing is configurable:
 ```yaml
 training:
   max_seq_length: 4096
+  warmup_ratio: 0.03
   packing: false
   train_sampling_strategy: random
   length_column_name: length
 ```
 
 `train_sampling_strategy: random` is the canonical default for both training regimes. Length bucketing remains available by setting `train_sampling_strategy: group_by_length`, but it is an explicit experiment rather than the default.
+
+`training.warmup_ratio` is resolved at training time into concrete `warmup_steps` from the tokenized training example count, per-device batch size, gradient accumulation, world size, and epochs. Set `training.warmup_steps` only when you want a fixed override.
 
 Use `scripts/debug_tokenization.py` before long runs to verify label masking on real examples.
 

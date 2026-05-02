@@ -110,7 +110,9 @@ training:
   per_device_train_batch_size: 5
   per_device_eval_batch_size: 4
   gradient_accumulation_steps: 3
-  warmup_steps: 450
+  # Resolved at train time from total optimizer steps; explicit warmup_steps
+  # can still be set for fixed-step experiments.
+  warmup_ratio: 0.03
   lr_scheduler_type: cosine
   weight_decay: 0.0
   optim: adamw_8bit

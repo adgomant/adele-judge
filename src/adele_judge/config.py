@@ -66,7 +66,7 @@ def normalize_config(config: dict[str, Any]) -> dict[str, Any]:
         training["train_sampling_strategy"] = "group_by_length"
     training.setdefault("train_sampling_strategy", "random")
     if "warmup_steps" not in training and "warmup_ratio" not in training:
-        training["warmup_steps"] = 0
+        training["warmup_ratio"] = 0.0
     training.setdefault("objective", "causal_lm")
     training.setdefault("class_weighting", None)
     training.setdefault("score_class_weights", None)
@@ -247,6 +247,12 @@ def validate_config(config: dict[str, Any]) -> None:
         raise ValueError(
             "training.train_sampling_strategy must be 'random', 'sequential', or 'group_by_length'"
         )
+    if "warmup_steps" in config["training"] and int(config["training"]["warmup_steps"]) < 0:
+        raise ValueError("training.warmup_steps must be >= 0")
+    if "warmup_ratio" in config["training"]:
+        warmup_ratio = float(config["training"]["warmup_ratio"])
+        if not 0.0 <= warmup_ratio <= 1.0:
+            raise ValueError("training.warmup_ratio must be between 0 and 1")
     preprocessing_workers = config.get("data", {}).get("preprocessing_num_workers", 1)
     try:
         resolve_num_workers(preprocessing_workers)

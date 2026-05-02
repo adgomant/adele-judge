@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import math
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -640,6 +641,8 @@ def training_args_kwargs(
     seed: int,
     *,
     evaluation_enabled: bool,
+    train_examples: int | None = None,
+    world_size: int = 1,
 ) -> dict[str, Any]:
     training = config["training"]
     kwargs = {
@@ -672,12 +675,53 @@ def training_args_kwargs(
     if "warmup_steps" in training:
         kwargs["warmup_steps"] = int(training["warmup_steps"])
     elif "warmup_ratio" in training:
-        kwargs["warmup_ratio"] = float(training["warmup_ratio"])
+        warmup_ratio = float(training["warmup_ratio"])
+        kwargs["warmup_ratio"] = warmup_ratio
+        if train_examples is not None:
+            kwargs["warmup_steps"] = resolved_warmup_steps(
+                train_examples,
+                config,
+                world_size=world_size,
+            )
     if bool(config.get("distributed", {}).get("enabled", False)):
         kwargs["disable_tqdm"] = not is_main_process()
         kwargs["log_on_each_node"] = False
     kwargs.update(distributed_training_args_kwargs(config))
     return kwargs
+
+
+def total_optimization_steps(
+    train_examples: int,
+    config: dict[str, Any],
+    *,
+    world_size: int,
+) -> int:
+    training = config["training"]
+    if train_examples < 1:
+        return 0
+    per_device_batch_size = int(training["per_device_train_batch_size"])
+    gradient_accumulation_steps = int(training["gradient_accumulation_steps"])
+    if per_device_batch_size < 1:
+        raise ValueError("training.per_device_train_batch_size must be >= 1")
+    if gradient_accumulation_steps < 1:
+        raise ValueError("training.gradient_accumulation_steps must be >= 1")
+    world_size = max(1, int(world_size))
+    batches_per_epoch = math.ceil(train_examples / (per_device_batch_size * world_size))
+    updates_per_epoch = math.ceil(batches_per_epoch / gradient_accumulation_steps)
+    return math.ceil(updates_per_epoch * float(training["num_train_epochs"]))
+
+
+def resolved_warmup_steps(
+    train_examples: int,
+    config: dict[str, Any],
+    *,
+    world_size: int,
+) -> int:
+    training = config["training"]
+    if "warmup_steps" in training:
+        return int(training["warmup_steps"])
+    warmup_ratio = float(training.get("warmup_ratio", 0.0))
+    return math.ceil(total_optimization_steps(train_examples, config, world_size=world_size) * warmup_ratio)
 
 
 def effective_global_batch_size(config: dict[str, Any], world_size: int) -> int:
@@ -708,6 +752,26 @@ def distributed_runtime_metadata(config: dict[str, Any], args: Any) -> dict[str,
         "gradient_accumulation_steps": int(training["gradient_accumulation_steps"]),
         "effective_global_batch_size": effective_global_batch_size(config, world_size),
     }
+
+
+def warmup_runtime_metadata(
+    config: dict[str, Any],
+    *,
+    train_examples: int,
+    world_size: int,
+) -> dict[str, Any]:
+    training = config["training"]
+    total_steps = total_optimization_steps(train_examples, config, world_size=world_size)
+    warmup_steps = resolved_warmup_steps(train_examples, config, world_size=world_size)
+    return {
+        "warmup_ratio": training.get("warmup_ratio"),
+        "warmup_steps": warmup_steps,
+        "total_optimization_steps": total_steps,
+    }
+
+
+def set_resolved_warmup_args(args: Any, warmup: dict[str, Any]) -> None:
+    args.warmup_steps = int(warmup["warmup_steps"])
 
 
 def detected_launcher() -> str:
@@ -780,6 +844,18 @@ def train_judge(
             tokenizer,
             config,
             output_dir,
+        )
+    warmup_metadata = warmup_runtime_metadata(
+        config,
+        train_examples=len(train_dataset),
+        world_size=batch_metadata["world_size"],
+    )
+    set_resolved_warmup_args(args, warmup_metadata)
+    if args.should_save:
+        print(
+            "Warmup steps: "
+            f"{warmup_metadata['warmup_steps']} "
+            f"of {warmup_metadata['total_optimization_steps']} optimizer steps"
         )
     eval_dataset = None
     if evaluation_enabled and eval_split is not None:
@@ -877,6 +953,7 @@ def train_judge(
                 "validation_monitor_examples": int(len(eval_split)) if eval_split is not None else 0,
                 "validation_full_examples": int(len(splits["validation"])),
                 "distributed": batch_metadata,
+                "warmup": warmup_metadata,
                 "world_size": batch_metadata["world_size"],
                 "effective_global_batch_size": batch_metadata["effective_global_batch_size"],
             },
