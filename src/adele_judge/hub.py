@@ -299,12 +299,21 @@ def collect_hub_metadata(
         "score_tokenization_report.json",
         "train_metrics.json",
         "validation_trainer_metrics.json",
-        "validation_metrics.json",
-        "test_metrics.json",
     ]:
         path = run_dir / name
         if path.exists():
             artifacts[name] = read_json(path)
+
+    for split in ["validation", "test"]:
+        scoped_metrics_name = f"evaluation/{split}/metrics.json"
+        scoped_metrics_path = run_dir / scoped_metrics_name
+        if scoped_metrics_path.exists():
+            artifacts[scoped_metrics_name] = read_json(scoped_metrics_path)
+            continue
+        legacy_metrics_name = f"{split}_metrics.json"
+        legacy_metrics_path = run_dir / legacy_metrics_name
+        if legacy_metrics_path.exists():
+            artifacts[legacy_metrics_name] = read_json(legacy_metrics_path)
 
     for name in ["config.yaml", "inference_config.yaml"]:
         path = run_dir / name
@@ -343,7 +352,15 @@ def render_model_card(
     base_model = config["model"]["model_name_or_path"]
     metrics = metadata.get("artifacts", {})
     metrics_note = "No evaluation metrics were found in the local run artifacts."
-    if "validation_metrics.json" in metrics or "test_metrics.json" in metrics:
+    if any(
+        name in metrics
+        for name in [
+            "evaluation/validation/metrics.json",
+            "evaluation/test/metrics.json",
+            "validation_metrics.json",
+            "test_metrics.json",
+        ]
+    ):
         metrics_note = "Validation/test metrics are included in `adele_judge_metadata.json`."
     return f"""---
 library_name: transformers

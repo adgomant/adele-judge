@@ -17,7 +17,7 @@ from .inference import predict_with_config
 from .metrics import majority_binary_baseline, majority_ordinal_baseline
 from .modeling import load_tokenizer
 from .pipeline import load_or_prepare_splits, load_prepared_split, prepare_dataset
-from .reporting import save_prediction_reports
+from .reporting import evaluation_dir, resolve_prediction_path, save_evaluation_reports, save_predictions
 from .splits import enumerate_lomo_models
 from .tokenization import supervised_token_debug_rows
 from .train import train_judge
@@ -171,15 +171,8 @@ def predict(
     df = load_prepared_split(run_config, split.value)
     console.print(f"[bold]Scoring:[/] {len(df):,} examples from {split.value}")
     predictions = predict_with_config(run_config, df)
-    metrics = save_prediction_reports(
-        predictions,
-        project_output_dir(run_config),
-        split.value,
-        threshold=int(run_config["inference"]["binary_threshold"]),
-        length_buckets=run_config.get("evaluation", {}).get("length_buckets"),
-    )
-    _print_metrics(metrics, f"{split.value.title()} Metrics")
-    console.print("[green]Wrote predictions and reports.[/]")
+    pred_path = save_predictions(predictions, project_output_dir(run_config), split.value)
+    console.print(f"[green]Wrote predictions:[/] {pred_path}")
 
 
 @app.command()
@@ -204,10 +197,10 @@ def evaluate(
     """Evaluate saved predictions and write reports."""
     run_config = _load_config(config, override)
     out_dir = project_output_dir(run_config)
-    pred_path = predictions or out_dir / f"predictions_{split.value}.parquet"
+    pred_path = resolve_prediction_path(out_dir, split.value, predictions)
     console.print(f"[bold]Predictions:[/] {pred_path}")
     prediction_df = pd.read_parquet(pred_path)
-    metrics = save_prediction_reports(
+    metrics = save_evaluation_reports(
         prediction_df,
         out_dir,
         split.value,
@@ -226,8 +219,9 @@ def evaluate(
         eval_df,
         threshold=int(run_config["inference"]["binary_threshold"]),
     )
-    write_json(out_dir / f"majority_baseline_{split.value}.json", baseline)
-    write_json(out_dir / f"majority_ordinal_baseline_{split.value}.json", ordinal_baseline)
+    eval_dir = evaluation_dir(out_dir, split.value)
+    write_json(eval_dir / "majority_baseline.json", baseline)
+    write_json(eval_dir / "majority_ordinal_baseline.json", ordinal_baseline)
     _print_metrics(metrics, f"{split.value.title()} Metrics")
     _print_metrics(baseline, "Majority Binary Baseline")
     _print_metrics(ordinal_baseline, "Majority Ordinal Baseline")

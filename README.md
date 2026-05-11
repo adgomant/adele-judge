@@ -527,24 +527,24 @@ inference_config.yaml
 Prediction and evaluation add split-specific artifacts such as:
 
 ```text
-predictions_validation.parquet
-predictions_test.parquet
-validation_metrics.json
-test_metrics.json
-majority_baseline_validation.json
-majority_baseline_test.json
-majority_ordinal_baseline_validation.json
-majority_ordinal_baseline_test.json
-confusion_matrix_ordinal_validation.csv
-confusion_matrix_binary_validation.csv
-validation_per_model_metrics.csv
-validation_per_benchmark_metrics.csv
-validation_per_task_metrics.csv
-validation_per_target_score_metrics.csv
-validation_per_response_length_bucket_metrics.csv
+predictions/validation/predictions.parquet
+predictions/test/predictions.parquet
+evaluation/validation/metrics.json
+evaluation/test/metrics.json
+evaluation/validation/majority_baseline.json
+evaluation/test/majority_baseline.json
+evaluation/validation/majority_ordinal_baseline.json
+evaluation/test/majority_ordinal_baseline.json
+evaluation/validation/confusion_matrix_ordinal.csv
+evaluation/validation/confusion_matrix_binary.csv
+evaluation/validation/per_model_metrics.csv
+evaluation/validation/per_benchmark_metrics.csv
+evaluation/validation/per_task_metrics.csv
+evaluation/validation/per_target_score_metrics.csv
+evaluation/validation/per_response_length_bucket_metrics.csv
 ```
 
-Some reports are also saved with non-split-specific convenience filenames, for example `per_model_metrics.csv` and `confusion_matrix_ordinal.csv`, and will reflect the most recently evaluated split.
+`predict` writes only files under `predictions/{split}/`. `evaluate` reads those predictions and writes only files under `evaluation/{split}/`.
 
 `dataset_filtering_report.json` includes both response-cap removals and full-sequence overflow counts. It also records the effective prompt budget, computed as `training.max_seq_length - data.filters.max_response_tokens`, to make length pressure easy to diagnose.
 

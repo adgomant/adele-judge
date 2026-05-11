@@ -41,6 +41,13 @@ from adele_judge.metrics import all_metrics, majority_binary_baseline
 from adele_judge.inference import predict_dataframe, score_allowed_continuations_batch
 from adele_judge.metrics import majority_ordinal_baseline
 from adele_judge.modeling import model_from_pretrained_kwargs, training_device_map
+from adele_judge.reporting import (
+    evaluation_dir,
+    prediction_path,
+    resolve_prediction_path,
+    save_evaluation_reports,
+    save_predictions,
+)
 from adele_judge.splits import fixed_by_model_split, lomo_split
 from adele_judge.tokenization import (
     batch_response_token_lengths,
@@ -658,6 +665,58 @@ def test_metrics_and_majority_baseline():
     assert ordinal_baseline["majority_score"] in {1, 2, 3, 5}
 
 
+def test_prediction_and_evaluation_artifacts_are_split_scoped(tmp_path):
+    predictions = pd.DataFrame(
+        {
+            "target_score": [1, 2, 3, 5],
+            "pred_score": [1, 3, 3, 4],
+            "target_binary": ["INCORRECT", "INCORRECT", "CORRECT", "CORRECT"],
+            "pred_binary": ["INCORRECT", "CORRECT", "CORRECT", "CORRECT"],
+            "model_id": ["m1", "m1", "m2", "m2"],
+            "benchmark": ["b1", "b1", "b2", "b2"],
+            "task": ["t1", "t2", "t1", "t2"],
+            "response_token_length": [10, 25, 60, 90],
+        }
+    )
+    path = save_predictions(predictions, tmp_path, "validation")
+    assert path == prediction_path(tmp_path, "validation")
+    assert path.exists()
+    assert not (tmp_path / "predictions_validation.parquet").exists()
+    assert not (tmp_path / "validation_metrics.json").exists()
+
+    metrics = save_evaluation_reports(
+        predictions,
+        tmp_path,
+        "validation",
+        length_buckets=[0, 50, 100],
+    )
+    out_dir = evaluation_dir(tmp_path, "validation")
+    assert metrics["num_examples"] == 4
+    assert (out_dir / "metrics.json").exists()
+    assert (out_dir / "confusion_matrix_ordinal.csv").exists()
+    assert (out_dir / "confusion_matrix_binary.csv").exists()
+    assert (out_dir / "per_model_metrics.csv").exists()
+    assert (out_dir / "per_response_length_bucket_metrics.csv").exists()
+    assert not (tmp_path / "confusion_matrix_ordinal.csv").exists()
+    assert not (tmp_path / "validation_per_model_metrics.csv").exists()
+    assert not (tmp_path / "per_model_metrics.csv").exists()
+
+
+def test_prediction_path_resolution_prefers_scoped_and_reads_legacy(tmp_path):
+    scoped = prediction_path(tmp_path, "test")
+    scoped.parent.mkdir(parents=True)
+    scoped.write_text("scoped", encoding="utf-8")
+    legacy = tmp_path / "predictions_test.parquet"
+    legacy.write_text("legacy", encoding="utf-8")
+
+    assert resolve_prediction_path(tmp_path, "test") == scoped
+    scoped.unlink()
+    assert resolve_prediction_path(tmp_path, "test") == legacy
+    assert resolve_prediction_path(tmp_path, "test", tmp_path / "custom.parquet") == (
+        tmp_path / "custom.parquet"
+    )
+
+
 def test_packing_preserves_supervised_labels():
     rows = [
         {"input_ids": [1, 2, 3], "attention_mask": [1, 1, 1], "labels": [-100, -100, 3]},
@@ -1236,11 +1295,13 @@ def test_hub_metadata_collects_available_run_artifacts(tmp_path):
     options = resolve_hub_options(cfg)
     options.run_dir.mkdir()
     write_json(options.run_dir / "train_metrics.json", {"train_loss": 0.12})
+    write_json(options.run_dir / "evaluation" / "validation" / "metrics.json", {"ordinal_accuracy": 0.5})
     write_json(options.run_dir / "split_report.json", {"train": {"examples": 10}})
     metadata = collect_hub_metadata(cfg, options.run_dir, options)
     assert metadata["repo_id"] == "user/test-run"
     assert metadata["base_model"] == "Qwen/Qwen3-8B"
     assert metadata["artifacts"]["train_metrics.json"]["train_loss"] == 0.12
+    assert metadata["artifacts"]["evaluation/validation/metrics.json"]["ordinal_accuracy"] == 0.5
     assert metadata["artifacts"]["split_report.json"]["train"]["examples"] == 10
 
 
