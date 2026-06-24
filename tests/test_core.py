@@ -1322,6 +1322,45 @@ def test_hub_model_card_documents_restricted_scoring(tmp_path):
     assert "restricted continuations" in card
     assert "generate()" in card
     assert "ADeLe-specific judge" in card
+    assert "Data Quality And Label Construction" in card
+    assert "floor(mean(score_gpt4o, score_sonnet))" in card
+    assert "https://kinds-of-intelligence-cfi.github.io/ADELE/" in card
+    assert "https://www.nature.com/articles/s41586-026-10303-2" in card
+    assert "CFI-Kinds-of-Intelligence/ADeLe_battery_v1dot0" in card
+    assert "ADeLe_battery_data/subject_specific_instance_level_data" in card
+
+
+def test_hub_model_card_renders_split_and_validation_metrics(tmp_path):
+    cfg = hub_config(tmp_path)
+    options = resolve_hub_options(cfg)
+    metadata = {
+        "artifacts": {
+            "split_report.json": {
+                "train": {"examples": 239420, "models": ["m1", "m2"], "num_models": 2},
+                "validation": {"examples": 45738, "models": ["m3"], "num_models": 1},
+            },
+            "validation_trainer_metrics.json": {
+                "epoch": 1.0,
+                "eval_binary_accuracy": 0.9893523984433076,
+                "eval_binary_macro_f1": 0.9880204659010172,
+                "eval_ordinal_accuracy": 0.963924963924964,
+            },
+            "dataset_filtering_report.json": {
+                "raw_examples": 304346,
+                "removed_by_disagreement": 16535,
+                "removed_by_response_length": 2502,
+                "sequence_overflow_count": 0,
+                "examples_after_sequence_filter": 285309,
+            },
+        },
+    }
+    card = render_model_card(cfg, metadata, options.repo_id)
+    assert "| train | 239,420 | 2 |" in card
+    assert "| validation | 45,738 | 1 |" in card
+    assert "Source artifact: `validation_trainer_metrics.json`." in card
+    assert "| Binary accuracy | 0.9894 |" in card
+    assert "| Ordinal accuracy | 0.9639 |" in card
+    assert "| Removed by judge disagreement | 16,535 |" in card
 
 
 def adele_pipeline(model=None, tokenizer=None, *, adele_config=None):

@@ -14,6 +14,18 @@ from .utils import ensure_dir, git_commit, package_versions, read_json, write_js
 
 DEFAULT_COMMIT_MESSAGE = "Upload ADeLe distilled judge"
 DEFAULT_MAX_SHARD_SIZE = "5GB"
+DEFAULT_IMPLEMENTATION_URL = "https://github.com/adgomant/adele-judge"
+DEFAULT_ADELE_PROJECT_URL = "https://kinds-of-intelligence-cfi.github.io/ADELE/"
+DEFAULT_ADELE_PAPER_TITLE = "General scales unlock AI evaluation with explanatory and predictive power"
+DEFAULT_ADELE_PAPER_URL = "https://www.nature.com/articles/s41586-026-10303-2"
+DEFAULT_ADELE_DATASET_ID = "CFI-Kinds-of-Intelligence/ADeLe_battery_v1dot0"
+DEFAULT_ADELE_DATASET_URL = (
+    "https://huggingface.co/datasets/CFI-Kinds-of-Intelligence/ADeLe_battery_v1dot0"
+)
+DEFAULT_ADELE_SOURCE_DATA_URL = (
+    "https://github.com/Kinds-of-Intelligence-CFI/ADeLe-AIEvaluation/tree/main/"
+    "ADeLe_battery_data/subject_specific_instance_level_data"
+)
 HUB_PIPELINE_FILENAME = "adele_judge_pipeline.py"
 STAGING_MARKER = ".adele_judge_staging"
 CUSTOM_PIPELINE_TASK = "adele-judge"
@@ -340,6 +352,208 @@ def collect_hub_metadata(
     }
 
 
+VALIDATION_METRIC_KEYS = [
+    ("binary_accuracy", "Binary accuracy"),
+    ("binary_macro_f1", "Binary macro F1"),
+    ("precision_correct", "Precision, CORRECT"),
+    ("recall_correct", "Recall, CORRECT"),
+    ("precision_incorrect", "Precision, INCORRECT"),
+    ("recall_incorrect", "Recall, INCORRECT"),
+    ("false_negative_rate_correct", "False negative rate, CORRECT"),
+    ("false_positive_rate_correct", "False positive rate, CORRECT"),
+    ("ordinal_accuracy", "Ordinal accuracy"),
+    ("ordinal_macro_f1", "Ordinal macro F1"),
+    ("confidence_mean", "Mean confidence"),
+]
+
+
+def markdown_table(headers: list[str], rows: list[list[str]]) -> str:
+    if not rows:
+        return ""
+    header = "| " + " | ".join(headers) + " |"
+    separator = "| " + " | ".join(["---"] * len(headers)) + " |"
+    body = ["| " + " | ".join(row) + " |" for row in rows]
+    return "\n".join([header, separator, *body])
+
+
+def format_int(value: Any) -> str:
+    try:
+        return f"{int(value):,}"
+    except (TypeError, ValueError):
+        return "N/A"
+
+
+def format_float(value: Any) -> str:
+    try:
+        return f"{float(value):.4f}"
+    except (TypeError, ValueError):
+        return "N/A"
+
+
+def metric_value(metrics: dict[str, Any], key: str) -> Any:
+    if key in metrics:
+        return metrics[key]
+    prefixed = f"eval_{key}"
+    if prefixed in metrics:
+        return metrics[prefixed]
+    return None
+
+
+def validation_metrics_artifact(artifacts: dict[str, Any]) -> tuple[str | None, dict[str, Any]]:
+    for name in [
+        "evaluation/validation/metrics.json",
+        "validation_metrics.json",
+        "validation_trainer_metrics.json",
+    ]:
+        value = artifacts.get(name)
+        if isinstance(value, dict):
+            return name, value
+    return None, {}
+
+
+def render_split_section(artifacts: dict[str, Any]) -> str:
+    split_report = artifacts.get("split_report.json")
+    if not isinstance(split_report, dict) or not split_report:
+        return "No split report was found in the local packaging artifacts."
+
+    rows = []
+    detail_lines = []
+    for split_name in ["train", "validation", "test"]:
+        split = split_report.get(split_name)
+        if not isinstance(split, dict):
+            continue
+        models = split.get("models") or []
+        rows.append(
+            [
+                split_name,
+                format_int(split.get("examples")),
+                format_int(split.get("num_models", len(models))),
+            ]
+        )
+        if models:
+            detail_lines.append(f"- `{split_name}` models: " + ", ".join(f"`{model}`" for model in models))
+
+    split_table = markdown_table(["Split", "Examples", "Models"], rows)
+    if detail_lines:
+        return split_table + "\n\n" + "\n".join(detail_lines)
+    return split_table
+
+
+def render_validation_section(artifacts: dict[str, Any]) -> str:
+    artifact_name, metrics = validation_metrics_artifact(artifacts)
+    if not metrics:
+        return (
+            "No validation metrics were found in the local run artifacts. "
+            "If available, they are stored in `adele_judge_metadata.json`."
+        )
+
+    rows = []
+    if "epoch" in metrics:
+        rows.append(["Epoch", format_float(metrics["epoch"])])
+    for key, label in VALIDATION_METRIC_KEYS:
+        value = metric_value(metrics, key)
+        if value is not None:
+            rows.append([label, format_float(value)])
+
+    note = f"Source artifact: `{artifact_name}`."
+    return note + "\n\n" + markdown_table(["Metric", "Value"], rows)
+
+
+def render_data_quality_section(config: dict[str, Any], artifacts: dict[str, Any]) -> str:
+    data_config = config.get("data", {}) if isinstance(config.get("data"), dict) else {}
+    columns = data_config.get("columns", {}) if isinstance(data_config.get("columns"), dict) else {}
+    filters = data_config.get("filters", {}) if isinstance(data_config.get("filters"), dict) else {}
+    judge_1 = columns.get("judge_1_score", "judge_1_score")
+    judge_2 = columns.get("judge_2_score", "judge_2_score")
+    threshold = int(config.get("inference", {}).get("binary_threshold", 3))
+    max_disagreement = filters.get("max_disagreement")
+    max_response_tokens = filters.get("max_response_tokens")
+    max_seq_length = config.get("training", {}).get("max_seq_length")
+
+    lines = [
+        "Training labels are distilled from two proprietary judge scores used by the "
+        "ADeLe evaluation pipeline to derive the official correctness signal. The "
+        f"configured source columns are `{judge_1}` and `{judge_2}`.",
+        "",
+        f"- Ordinal target: `floor(mean({judge_1}, {judge_2}))`.",
+        f"- Binary target: `CORRECT` when the ordinal target is >= `{threshold}`.",
+    ]
+    if max_disagreement is not None:
+        lines.append(
+            f"- Judge-agreement filter: keep examples with "
+            f"`abs({judge_1} - {judge_2}) <= {max_disagreement}`."
+        )
+    if max_response_tokens is not None:
+        lines.append(
+            f"- Response-length filter: keep responses with at most `{max_response_tokens}` "
+            "base-tokenizer tokens before prompt formatting."
+        )
+    if max_seq_length is not None:
+        lines.append(
+            f"- Sequence-length filter: keep full chat-formatted examples within "
+            f"`max_seq_length={max_seq_length}`."
+        )
+
+    filtering_report = artifacts.get("dataset_filtering_report.json")
+    if isinstance(filtering_report, dict) and filtering_report:
+        rows = []
+        for key, label in [
+            ("raw_examples", "Raw examples"),
+            ("removed_by_disagreement", "Removed by judge disagreement"),
+            ("removed_by_response_length", "Removed by response length"),
+            ("sequence_overflow_count", "Removed by full sequence overflow"),
+            ("examples_after_sequence_filter", "Examples after filters"),
+        ]:
+            if key in filtering_report:
+                rows.append([label, format_int(filtering_report[key])])
+        if rows:
+            lines.extend(["", markdown_table(["Filtering stage", "Examples"], rows)])
+
+    length_statistics = artifacts.get("length_statistics.json")
+    response_stats = (
+        length_statistics.get("response_token_length")
+        if isinstance(length_statistics, dict)
+        else None
+    )
+    if isinstance(response_stats, dict):
+        rows = []
+        for key, label in [
+            ("mean", "Mean"),
+            ("p50", "P50"),
+            ("p90", "P90"),
+            ("p95", "P95"),
+            ("p99", "P99"),
+            ("max", "Max"),
+        ]:
+            if key in response_stats:
+                rows.append([label, format_float(response_stats[key])])
+        if rows:
+            lines.extend(["", "Response-token length summary:", "", markdown_table(["Stat", "Tokens"], rows)])
+
+    return "\n".join(lines)
+
+
+def render_references_section(config: dict[str, Any]) -> str:
+    hub_config = config.get("hub", {}) if isinstance(config.get("hub"), dict) else {}
+    project_url = hub_config.get("project_url") or DEFAULT_ADELE_PROJECT_URL
+    paper_title = hub_config.get("paper_title") or DEFAULT_ADELE_PAPER_TITLE
+    paper_url = hub_config.get("paper_url") or DEFAULT_ADELE_PAPER_URL
+    dataset_id = hub_config.get("dataset_id") or DEFAULT_ADELE_DATASET_ID
+    dataset_url = hub_config.get("dataset_url") or DEFAULT_ADELE_DATASET_URL
+    source_data_url = hub_config.get("source_data_url") or DEFAULT_ADELE_SOURCE_DATA_URL
+    implementation_url = hub_config.get("implementation_url") or DEFAULT_IMPLEMENTATION_URL
+    paper_reference = f"[{paper_title}]({paper_url})" if paper_url else paper_title
+    return "\n".join(
+        [
+            f"- ADeLe project page: [ADeLe v1.0]({project_url}).",
+            f"- ADeLe paper and official correctness definition: {paper_reference}.",
+            f"- Official ADeLe dataset: [{dataset_id}]({dataset_url}).",
+            f"- Official instance-level model-response data used for distillation: [{source_data_url}]({source_data_url}).",
+            f"- Training and Hub packaging implementation: [{implementation_url}]({implementation_url}).",
+        ]
+    )
+
+
 def render_model_card(
     config: dict[str, Any],
     metadata: dict[str, Any],
@@ -350,18 +564,11 @@ def render_model_card(
         str(score) for score in config.get("inference", {}).get("allowed_scores", ["1", "2", "3", "4", "5"])
     )
     base_model = config["model"]["model_name_or_path"]
-    metrics = metadata.get("artifacts", {})
-    metrics_note = "No evaluation metrics were found in the local run artifacts."
-    if any(
-        name in metrics
-        for name in [
-            "evaluation/validation/metrics.json",
-            "evaluation/test/metrics.json",
-            "validation_metrics.json",
-            "test_metrics.json",
-        ]
-    ):
-        metrics_note = "Validation/test metrics are included in `adele_judge_metadata.json`."
+    artifacts = metadata.get("artifacts", {})
+    split_section = render_split_section(artifacts)
+    validation_section = render_validation_section(artifacts)
+    data_quality_section = render_data_quality_section(config, artifacts)
+    references_section = render_references_section(config)
     return f"""---
 library_name: transformers
 tags:
@@ -374,13 +581,13 @@ base_model: {base_model}
 
 # ADeLe Distilled Judge
 
-This repository contains an ADeLe-suite-specific distilled judge. It scores a model response against a question and reference answer with an ordinal score from 1 to 5.
+This repository contains an ADeLe-suite-specific distilled judge. It scores a model response against a question and reference answer with an ordinal score from 1 to 5, then derives binary correctness with the ADeLe threshold.
 
 The repository root contains a merged Transformers model for standard loading. The original LoRA adapter is also included under `adapter/` for provenance and reuse.
 
 ## Intended Use
 
-Use this model to score ADeLe-style examples where a question, reference answer, and model response are available. It is not a general-purpose evaluator.
+Use this model to score ADeLe-style examples where a question, reference answer, and model response are available. It is intended for out-of-model evaluation within the ADeLe benchmark suite, not as a general-purpose evaluator.
 
 ## Input Format
 
@@ -401,6 +608,18 @@ Allowed scores: {allowed_scores}
 - 5: surely correct
 
 Binary label: scores greater than or equal to {threshold} are `CORRECT`; lower scores are `INCORRECT`.
+
+## Training And Validation Data
+
+{split_section}
+
+## Data Quality And Label Construction
+
+{data_quality_section}
+
+## Validation Results
+
+{validation_section}
 
 ## Recommended Inference
 
@@ -455,12 +674,17 @@ model = AutoModelForCausalLM.from_pretrained("{repo_id}", trust_remote_code=True
 
 Training, filtering, split, tokenization, and metric artifacts available at packaging time are stored in `adele_judge_metadata.json`.
 
-{metrics_note}
+The model is trained on distilled judge targets. These targets are useful for reproducing the ADeLe paper-style correctness signal at lower inference cost, but they should not be interpreted as independent human annotations.
+
+## References
+
+{references_section}
 
 ## Limitations
 
 - ADeLe-specific judge; not a general-purpose evaluator.
-- Distilled from judge labels and inherits their noise and biases.
+- Distilled from proprietary judge labels and inherits their noise, calibration, and biases.
 - Intended for scoring responses against a reference answer.
 - It should not produce explanations; the expected output is a single score.
+- Validation is out-of-model within the ADeLe suite, so transfer outside that suite should be measured before relying on it.
 """

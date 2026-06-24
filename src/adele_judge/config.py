@@ -132,6 +132,23 @@ def normalize_config(config: dict[str, Any]) -> dict[str, Any]:
     hub.setdefault("output_staging_dir", None)
     hub.setdefault("create_pr", False)
     hub.setdefault("max_shard_size", "5GB")
+    hub.setdefault("project_url", "https://kinds-of-intelligence-cfi.github.io/ADELE/")
+    hub.setdefault(
+        "paper_title",
+        "General scales unlock AI evaluation with explanatory and predictive power",
+    )
+    hub.setdefault("paper_url", "https://www.nature.com/articles/s41586-026-10303-2")
+    hub.setdefault("dataset_id", "CFI-Kinds-of-Intelligence/ADeLe_battery_v1dot0")
+    hub.setdefault(
+        "dataset_url",
+        "https://huggingface.co/datasets/CFI-Kinds-of-Intelligence/ADeLe_battery_v1dot0",
+    )
+    hub.setdefault(
+        "source_data_url",
+        "https://github.com/Kinds-of-Intelligence-CFI/ADeLe-AIEvaluation/tree/main/"
+        "ADeLe_battery_data/subject_specific_instance_level_data",
+    )
+    hub.setdefault("implementation_url", "https://github.com/adgomant/adele-judge")
     configure_cpu_environment(config)
     return config
 
