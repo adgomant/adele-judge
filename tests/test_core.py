@@ -1363,11 +1363,11 @@ def test_hub_model_card_renders_split_and_validation_metrics(tmp_path):
     assert "| Removed by judge disagreement | 16,535 |" in card
 
 
-def adele_pipeline(model=None, tokenizer=None, *, adele_config=None):
+def adele_pipeline(model=None, tokenizer=None, *, adele_config=None, device=-1):
     return ADeLeJudgePipeline(
         model=model or AlwaysFiveModel(),
         tokenizer=tokenizer or FakeTokenizer(),
-        device=-1,
+        device=device,
         adele_config=adele_config
         or {
             "prompt": {"system_prompt": "Return one score."},
@@ -1404,6 +1404,55 @@ def test_transformers_pipeline_loads_custom_pipeline_locally():
         },
     )
     assert isinstance(pipe, ADeLeJudgePipeline)
+
+
+def test_hub_pipeline_realigns_requested_device_after_distributed_init(monkeypatch):
+    import torch
+
+    model = AlwaysFiveModel()
+    set_device_calls = []
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "set_device", lambda index: set_device_calls.append(index))
+    monkeypatch.setattr(torch.distributed, "is_available", lambda: True)
+    monkeypatch.setattr(torch.distributed, "is_initialized", lambda: True)
+
+    pipe = adele_pipeline(model=model, device=2)
+
+    assert pipe.device == torch.device("cuda:2")
+    assert model.device == torch.device("cuda:2")
+    assert set_device_calls == [2]
+
+
+def test_hub_pipeline_device_minus_one_resolves_to_cpu():
+    import torch
+
+    model = AlwaysFiveModel()
+    model.device = torch.device("cuda:0")
+
+    pipe = adele_pipeline(model=model, device=-1)
+
+    assert pipe.device == torch.device("cpu")
+    assert model.device == torch.device("cpu")
+
+
+def test_hub_pipeline_does_not_move_accelerate_device_mapped_model():
+    class DeviceMappedModel(AlwaysFiveModel):
+        hf_device_map = {"": "cpu"}
+
+        def __init__(self):
+            super().__init__()
+            self.to_calls = []
+
+        def to(self, device):
+            self.to_calls.append(device)
+            return super().to(device)
+
+    model = DeviceMappedModel()
+
+    pipe = adele_pipeline(model=model, device=None)
+
+    assert str(pipe.device) == "cpu"
+    assert model.to_calls == []
 
 
 def test_hub_pipeline_scores_single_dict_with_restricted_continuations():

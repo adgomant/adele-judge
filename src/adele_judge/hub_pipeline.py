@@ -189,6 +189,39 @@ def single_score_token_ids(tokenizer: Any, allowed_scores: list[str]) -> list[in
     return [ids[0] for ids in token_ids]
 
 
+def resolve_requested_device(requested_device: Any, fallback_device: Any) -> Any:
+    import torch
+
+    if requested_device is None:
+        return None
+    if isinstance(requested_device, torch.device):
+        return requested_device
+    if isinstance(requested_device, str):
+        return torch.device(requested_device)
+    if isinstance(requested_device, int):
+        if requested_device < 0:
+            return torch.device("cpu")
+        if torch.cuda.is_available():
+            return torch.device(f"cuda:{requested_device}")
+        return torch.device(fallback_device)
+    return torch.device(requested_device)
+
+
+def model_device(model: Any) -> Any:
+    import torch
+
+    device = getattr(model, "device", None)
+    if device is not None:
+        return torch.device(device)
+    parameters = getattr(model, "parameters", None)
+    if callable(parameters):
+        try:
+            return next(parameters()).device
+        except StopIteration:
+            return None
+    return None
+
+
 class ADeLeJudgePipeline(Pipeline):
     """HF-native custom pipeline for restricted ADeLe judge scoring."""
 
@@ -198,7 +231,19 @@ class ADeLeJudgePipeline(Pipeline):
         adele_config: dict[str, Any] | None = None,
         **kwargs: Any,
     ) -> None:
+        requested_device = kwargs.get("device")
         super().__init__(*args, **kwargs)
+        if requested_device is not None and getattr(self.model, "hf_device_map", None) is None:
+            import torch
+
+            target_device = resolve_requested_device(requested_device, self.device)
+            if target_device is not None:
+                if target_device.type == "cuda" and target_device.index is not None:
+                    torch.cuda.set_device(target_device.index)
+                if model_device(self.model) != target_device:
+                    self.model.to(target_device)
+                self.device = target_device
+
         if self.tokenizer is None:
             raise ValueError("ADeLeJudgePipeline requires a tokenizer")
         if getattr(self.tokenizer, "pad_token", None) is None:
